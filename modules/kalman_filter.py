@@ -1,0 +1,149 @@
+# modules/kalman_filter.py
+import numpy as np
+
+class ExtendedKalmanFilter:
+    def __init__(self, x_init, P_init, F_func, Q_func, R_matrix, dt):
+        self.x = x_init.reshape(-1, 1)
+        self.P = P_init
+        self.F_func = F_func
+        self.Q_func = Q_func
+        self.R = R_matrix
+        self.dt = dt
+        self.I = np.eye(self.x.shape[0])
+
+    def predict(self):
+        F = self.F_func(self.dt)
+        Q = self.Q_func(self.dt)
+        self.x = F @ self.x
+        self.P = F @ self.P @ F.T + Q
+
+    def hx(self, x_state, observer_state):
+        px, py, vx, vy = x_state[0, 0], x_state[1, 0], x_state[2, 0], x_state[3, 0]
+        obs_px, obs_py, obs_vx, obs_vy = observer_state[0], observer_state[1], observer_state[2], observer_state[3]
+
+        delta_px_global = px - obs_px
+        delta_py_global = py - obs_py
+
+        # 观测者航向角
+        observer_heading_rad = np.arctan2(obs_vy, obs_vx) if not (np.isclose(obs_vx, 0) and np.isclose(obs_vy, 0)) else 0
+
+        # 目标在雷达局部坐标系下的相对位置
+        x_radar_rel = delta_px_global * np.cos(observer_heading_rad) + delta_py_global * np.sin(observer_heading_rad)
+        y_radar_rel = -delta_px_global * np.sin(observer_heading_rad) + delta_py_global * np.cos(observer_heading_rad)
+
+        range_val = np.sqrt(x_radar_rel**2 + y_radar_rel**2)
+        if range_val < 1e-6: range_val = 1e-6
+
+        azimuth_local = np.arctan2(y_radar_rel, x_radar_rel)
+
+        # 径向速度
+        relative_vx_global = vx - obs_vx
+        relative_vy_global = vy - obs_vy
+        radial_velocity = (relative_vx_global * delta_px_global + relative_vy_global * delta_py_global) / range_val
+        # 或者在雷达局部坐标系下计算
+        # dvx_radar_rel = relative_vx_global * np.cos(observer_heading_rad) + relative_vy_global * np.sin(observer_heading_rad)
+        # dvy_radar_rel = -relative_vx_global * np.sin(observer_heading_rad) + relative_vy_global * np.cos(observer_heading_rad)
+        # radial_velocity = (x_radar_rel * dvx_radar_rel + y_radar_rel * dvy_radar_rel) / range_val
+
+
+        return np.array([[range_val], [azimuth_local], [radial_velocity]])
+
+    def jacobian_H(self, x_state, observer_state):
+        px, py, vx, vy = x_state[0, 0], x_state[1, 0], x_state[2, 0], x_state[3, 0]
+        obs_px, obs_py, obs_vx, obs_vy = observer_state[0], observer_state[1], observer_state[2], observer_state[3]
+        
+        # 观测者航向角
+        phi = np.arctan2(obs_vy, obs_vx) if not (np.isclose(obs_vx, 0) and np.isclose(obs_vy, 0)) else 0
+        cos_phi = np.cos(phi)
+        sin_phi = np.sin(phi)
+
+        # 目标相对于观测者的全局坐标差值
+        delta_px_g = px - obs_px
+        delta_py_g = py - obs_py
+
+        # 目标在雷达局部坐标系下的相对位置
+        x_r = delta_px_g * cos_phi + delta_py_g * sin_phi
+        y_r = -delta_px_g * sin_phi + delta_py_g * cos_phi
+        
+        range_sq = x_r**2 + y_r**2
+        range_val = np.sqrt(range_sq)
+
+        # --- 在这里增加同样的保护性检查 ---
+        if range_val < 0.1: # 避免除以零 (与tracker中的门限一致或更小)
+            # print(f"Warning: Jacobian H calculation - range_val ({range_val:.3f}) is too small. State: {x_state.flatten()}, Obs: {observer_state}")
+            return np.zeros((3,4)) # 返回一个零矩阵，这将导致卡尔曼增益为零，状态不更新
+        # --- 检查结束 ---
+
+        # 偏导数计算 (h = [range, theta_local, vr]^T, x = [px, py, vx, vy]^T)
+        # dr/dpx = (x_r * cos_phi - y_r * sin_phi) / range_val
+        # dr/dpy = (x_r * sin_phi + y_r * cos_phi) / range_val
+        # d(theta_local)/dpx = (-y_r * cos_phi - x_r * sin_phi) / range_sq
+        # d(theta_local)/dpy = (-y_r * sin_phi + x_r * cos_phi) / range_sq
+        # d(vr)/dpx, d(vr)/dpy, d(vr)/dvx, d(vr)/dvy (这些比较复杂，因为vr的表达式涉及全局速度和相对位置)
+
+        # 简化版 H (如果只用距离和局部方位角更新位置，速度通过模型预测)
+        # 或者更完整的H，这里我们用数值方法近似或使用符号计算库推导
+        # 为了让代码能跑起来，我们先用一个简化的H，只考虑位置对距离和局部方位角的影响
+        # 假设速度项对观测函数h(x)中距离和角度部分的偏导为0
+        
+        # dr/dpx_g, dr/dpy_g, dr/dvx_g, dr/dvy_g
+        dr_dpx = x_r * cos_phi / range_val - y_r * (-sin_phi) / range_val # (x_r/range_val)*cos_phi + (y_r/range_val)*sin_phi
+        dr_dpy = x_r * sin_phi / range_val + y_r * cos_phi / range_val   # (x_r/range_val)*sin_phi - (y_r/range_val)*cos_phi
+        H_row1 = [dr_dpx, dr_dpy, 0, 0]
+
+        # dtheta_local/dpx_g, dtheta_local/dpy_g, dtheta_local/dvx_g, dtheta_local/dvy_g
+        dthetal_dpx = (-y_r * cos_phi - x_r * (-sin_phi)) / range_sq
+        dthetal_dpy = (-y_r * sin_phi - x_r * cos_phi) / range_sq
+        H_row2 = [dthetal_dpx, dthetal_dpy, 0, 0]
+
+        # dvr/dpx_g, dvr/dpy_g, dvr/dvx_g, dvr/dvy_g
+        # vr = ((vx-obs_vx)*delta_px_g + (vy-obs_vy)*delta_py_g) / range_val_global
+        # delta_px_g = px - obs_px, delta_py_g = py - obs_py
+        # range_val_global = sqrt(delta_px_g^2 + delta_py_g^2)
+        # 注意：这里的range_val是雷达局部坐标系下的距离，而径向速度定义通常基于全局相对位置和速度
+        range_val_global = np.sqrt(delta_px_g**2 + delta_py_g**2)
+        if range_val_global < 1e-6: range_val_global = 1e-6
+
+        rel_vx_g = vx - obs_vx
+        rel_vy_g = vy - obs_vy
+
+        # d(vr)/d(px_g)
+        term1_dpx = rel_vx_g / range_val_global
+        term2_dpx = (rel_vx_g * delta_px_g + rel_vy_g * delta_py_g) * (-delta_px_g / (range_val_global**3))
+        dvr_dpx = term1_dpx + term2_dpx
+        # d(vr)/d(py_g)
+        term1_dpy = rel_vy_g / range_val_global
+        term2_dpy = (rel_vx_g * delta_px_g + rel_vy_g * delta_py_g) * (-delta_py_g / (range_val_global**3))
+        dvr_dpy = term1_dpy + term2_dpy
+        # d(vr)/d(vx_g)
+        dvr_dvx = delta_px_g / range_val_global
+        # d(vr)/d(vy_g)
+        dvr_dvy = delta_py_g / range_val_global
+        H_row3 = [dvr_dpx, dvr_dpy, dvr_dvx, dvr_dvy]
+
+        H_matrix = np.array([H_row1, H_row2, H_row3])
+        return H_matrix
+
+
+    def update(self, z_measurement_polar, observer_state_global):
+        z_pred = self.hx(self.x, observer_state_global)
+        H = self.jacobian_H(self.x, observer_state_global)
+
+        if np.all(H == 0): # 雅可比计算失败 (例如距离过近导致range_val为0)
+            # print(f"EKF Update skipped for state {self.x.flatten()}: Jacobian H is zero (likely too close to observer).")
+            return False
+
+        S = H @ self.P @ H.T + self.R
+        try:
+            K = self.P @ H.T @ np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            # print(f"Warning: Singular matrix S in EKF update for state {self.x.flatten()}. P:\n{self.P}\nH:\n{H}\nR:\n{self.R}\nS:\n{S}")
+            return False # 更新失败
+
+        z_actual = np.array(z_measurement_polar).reshape(3, 1)
+        y = z_actual - z_pred
+        y[1, 0] = (y[1, 0] + np.pi) % (2 * np.pi) - np.pi
+
+        self.x = self.x + K @ y
+        self.P = (self.I - K @ H) @ self.P
+        return True # 更新成功

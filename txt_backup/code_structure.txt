@@ -1,0 +1,27 @@
+# File processed on: 2025-06-11 00:08:58
+
+radar_simulation_work2/
+├── modules
+│   ├── cfar_test.py
+│   ├── data_generator.py
+│   ├── detector.py
+│   ├── kalman_filter.py
+│   ├── track.py
+│   ├── tracker.py
+│   └── visualizer.py
+├── output
+│   ├── data
+│   │   ├── radar_measurements.pkl
+│   │   ├── true_observer_trajectory.npy
+│   │   ├── true_target_1_trajectory.npy
+│   │   └── true_target_2_trajectory.npy
+│   └── plots
+│       ├── Figure_1.png
+│       ├── cfar_detection_demo.png
+│       ├── trajectories_and_measurements.png
+│       └── trajectories_measurements_detections.png
+├── README.md
+├── config.py
+├── main.py
+├── pyproject.toml
+└── uv.lock

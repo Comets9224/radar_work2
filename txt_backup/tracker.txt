@@ -1,0 +1,164 @@
+# File processed on: 2025-06-10 23:33:37
+
+# modules/tracker.py
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+from scipy.spatial.distance import cdist
+from .track import Track
+from . import data_generator # 确保导入
+import config as cfg
+
+class Tracker:
+    def __init__(self):
+        self.tracks = []
+        self.dt = cfg.TIME_STEP
+        Track._next_id = 1 # 重置航迹ID计数器，确保每次运行Tracker实例时ID从1开始
+
+    def _calculate_cost_matrix_polar(self, tracks, current_polar_measurements, observer_state_global):
+        """
+        计算成本矩阵，基于预测观测和实际观测在极坐标空间的差异。
+        :param tracks: list of Track objects
+        :param current_polar_measurements: list of [r, theta_local, vr]
+        :param observer_state_global: current observer state [px, py, vx, vy]
+        :return: cost_matrix
+        """
+        num_tracks = len(tracks)
+        num_detections = len(current_polar_measurements)
+        cost_matrix = np.full((num_tracks, num_detections), np.inf)
+
+        if num_tracks == 0 or num_detections == 0:
+            return cost_matrix
+
+        for i, track in enumerate(tracks):
+            # 获取航迹预测的观测值 [r_pred, theta_local_pred, vr_pred]
+            predicted_measurement = track.get_predicted_measurement(observer_state_global)
+            
+            for j, actual_measurement_polar in enumerate(current_polar_measurements):
+                diff = np.array(predicted_measurement) - np.array(actual_measurement_polar)
+                
+                # 角度差归一化到 [-pi, pi]
+                diff[1] = (diff[1] + np.pi) % (2 * np.pi) - np.pi
+                
+                # 简化的加权欧氏距离作为成本
+                # 权重可以基于观测噪声的倒数，较大的噪声对应较小的权重
+                # 这里使用标准差的倒数作为权重示例
+                # 权重也可以更复杂，例如使用马氏距离的平方根（如果计算创新协方差S的逆）
+                cost_r = (diff[0] / cfg.SIGMA_RANGE)**2 if cfg.SIGMA_RANGE > 1e-6 else (diff[0] * 1e6)**2
+                # 对于角度，误差的物理意义是弧长差 r * d_theta
+                # 所以角度误差的权重应该是 1 / (r_pred * sigma_theta) 或者 1 / sigma_theta，然后乘以r_pred
+                # 这里简化：直接用角度差，但其影响会随距离变化，门限也应考虑这一点
+                # 或者，将角度差转换为横向距离误差 r_pred * sin(diff_theta) approx r_pred * diff_theta
+                cost_theta = (predicted_measurement[0] * diff[1] / (cfg.RADAR_MAX_RANGE * cfg.SIGMA_AZIMUTH))**2 if cfg.SIGMA_AZIMUTH > 1e-6 else (diff[1]*1e6)**2
+                cost_vr = (diff[2] / cfg.SIGMA_RADIAL_VELOCITY)**2 if cfg.SIGMA_RADIAL_VELOCITY > 1e-6 else (diff[2]*1e6)**2
+                
+                # 组合成本，可以调整各项权重
+                # cost_matrix[i, j] = np.sqrt(cost_r + cost_theta + 0.1 * cost_vr) # 速度项权重较低
+                cost_matrix[i, j] = np.sqrt(cost_r + cost_theta) # 暂时只用位置相关的
+
+        # 门控：使用卡方分布的门限值 (cfg.GATING_THRESHOLD)
+        # 这个门限通常是针对马氏距离平方的，如果成本是加权欧氏距离，门限需要调整
+        # 假设这里的成本近似于马氏距离的平方根，所以门限也用其平方根
+        # 或者，直接定义一个与成本计算方式匹配的门限
+        # 这里的门控值需要仔细调整
+        cost_matrix[cost_matrix > np.sqrt(cfg.GATING_THRESHOLD * 2)] = np.inf # 乘以2作为调整因子，需要实验
+
+        return cost_matrix
+
+    def _data_association_gnn(self, cost_matrix):
+        if cost_matrix.shape[0] == 0 or cost_matrix.shape[1] == 0 or np.all(cost_matrix == np.inf):
+            return [], list(range(cost_matrix.shape[0])), list(range(cost_matrix.shape[1]))
+
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        matched_pairs = []
+        unmatched_track_indices_set = set(range(cost_matrix.shape[0]))
+        unmatched_detection_indices_set = set(range(cost_matrix.shape[1]))
+
+        for r, c in zip(row_ind, col_ind):
+            if cost_matrix[r, c] < np.inf:
+                matched_pairs.append((self.tracks[r], c))
+                unmatched_track_indices_set.discard(r)
+                unmatched_detection_indices_set.discard(c)
+        
+        unmatched_tracks = [self.tracks[i] for i in unmatched_track_indices_set]
+        return matched_pairs, unmatched_tracks, list(unmatched_detection_indices_set)
+
+    def initiate_track(self, detection_polar, observer_state_global, current_time):
+        new_track = Track(detection_polar, observer_state_global, current_time, self.dt)
+        self.tracks.append(new_track)
+        print(f"Time {current_time:.1f}s: Initiated Track ID {new_track.track_id} from detection [r:{detection_polar[0]:.1f}, th:{np.rad2deg(detection_polar[1]):.1f}deg, vr:{detection_polar[2]:.1f}]. Total tracks: {len(self.tracks)}")
+
+    def manage_tracks(self, current_time):
+        tracks_to_keep = []
+        for track in self.tracks:
+            if track.state == 'Tentative':
+                if track.hits >= cfg.M_CONFIRM:
+                    track.state = 'Confirmed'
+                    print(f"Time {current_time:.1f}s: Track ID {track.track_id} Confirmed. Hits: {track.hits}, Age: {track.age}")
+                elif track.age > cfg.N_CONFIRM and track.hits < cfg.M_CONFIRM :
+                    track.state = 'Deleted'
+                    print(f"Time {current_time:.1f}s: Tentative Track ID {track.track_id} Deleted (age {track.age} > N_CONFIRM {cfg.N_CONFIRM}, hits {track.hits} < M_CONFIRM {cfg.M_CONFIRM}).")
+
+            if track.misses > cfg.MAX_CONSECUTIVE_MISSES:
+                if track.state != 'Deleted':
+                    track.state = 'Deleted'
+                    print(f"Time {current_time:.1f}s: Track ID {track.track_id} (was {track.state if track.state!='Deleted' else 'Tentative/Confirmed'}) Deleted (max misses {track.misses}).")
+
+            if track.state != 'Deleted':
+                tracks_to_keep.append(track)
+        
+        if len(self.tracks) != len(tracks_to_keep):
+            print(f"Time {current_time:.1f}s: Tracks pruned. Kept: {len(tracks_to_keep)}, Deleted: {len(self.tracks) - len(tracks_to_keep)}")
+        self.tracks = tracks_to_keep
+
+    def step(self, detected_targets_global_cartesian, raw_measurements_polar, observer_state_global, current_time):
+        """
+        :param detected_targets_global_cartesian: DBSCAN输出的全局笛卡尔坐标点 [[gx, gy], ...] (目前未使用)
+        :param raw_measurements_polar: 原始的雷达极坐标观测列表 [[r, theta_local, vr], ...]
+        """
+        for track in self.tracks:
+            track.predict()
+
+        # 使用原始的极坐标量测 (raw_measurements_polar) 进行数据关联
+        cost_m = self._calculate_cost_matrix_polar(self.tracks, raw_measurements_polar, observer_state_global)
+        
+        matched_pairs, unmatched_tracks_list, unmatched_detections_indices_list = \
+            self._data_association_gnn(cost_m)
+
+        # 更新匹配上的航迹
+        for track, det_idx in matched_pairs:
+            # det_idx 是 raw_measurements_polar 中的索引
+            actual_measurement_polar = raw_measurements_polar[det_idx]
+            track.update(actual_measurement_polar, observer_state_global, current_time)
+            # print(f"Time {current_time:.1f}s: Track ID {track.track_id} updated with meas {det_idx}.")
+
+
+        # 处理未匹配的航迹 (漏检)
+        for track in unmatched_tracks_list:
+            track.mark_missed()
+            # print(f"Time {current_time:.1f}s: Track ID {track.track_id} marked missed. Misses: {track.misses}")
+
+
+        # 处理未匹配的检测 (用于新航迹起始)
+        # 这里的逻辑是：所有未被现有航迹关联上的原始量测，都尝试用于起始新航迹
+        # DBSCAN的结果 (detected_targets_global_cartesian) 在这个简化版本中没有直接用来过滤新航迹的起始
+        # 一个更复杂的策略可以是：只用那些同时被DBSCAN识别为簇中心（或属于某个簇）的未匹配原始量测来起始新航迹
+        for det_idx in unmatched_detections_indices_list:
+            measurement_to_init = raw_measurements_polar[det_idx]
+            # 确保这个检测点在雷达的感知范围内 (虽然已在data_generator中处理，但这里是针对原始量测)
+            r_det, theta_det, _ = measurement_to_init
+            if cfg.RADAR_MIN_RANGE <= r_det <= cfg.RADAR_MAX_RANGE and abs(theta_det) <= cfg.RADAR_FOV_RAD / 2:
+                self.initiate_track(measurement_to_init, observer_state_global, current_time)
+
+        self.manage_tracks(current_time)
+
+        current_estimated_tracks_for_plot = []
+        for track in self.tracks:
+            if track.state != 'Deleted': # 只返回非删除状态的航迹
+                current_estimated_tracks_for_plot.append({
+                    'id': track.track_id,
+                    'state_vec': track.kf.x.flatten().tolist(), # 当前最新状态向量
+                    'history_states': np.array(track.history).tolist(), # 完整历史轨迹状态
+                    'color': cfg.TARGET_COLORS[(track.track_id -1) % len(cfg.TARGET_COLORS)],
+                    'current_state_str': track.state # 'Tentative' or 'Confirmed'
+                })
+        return current_estimated_tracks_for_plot

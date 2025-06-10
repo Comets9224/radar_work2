@@ -1,6 +1,78 @@
-def main():
-    print("Hello from radar-simulation-work2!")
+# main.py
+import config as cfg
+from modules import data_generator, visualizer, detector
+from modules.tracker import Tracker
+import numpy as np
+import os
+import matplotlib.pyplot as plt
 
+def run_simulation():
+    # --- 打印配置和模型信息 ---
+    cfg.print_config_summary() # 调用config中的打印函数
+    data_generator.print_motion_equations()
+
+    print("Starting Radar Target Detection and Tracking System Simulation...")
+
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    os.makedirs(cfg.OUTPUT_DATA_DIR, exist_ok=True)
+    os.makedirs(cfg.OUTPUT_PLOTS_DIR, exist_ok=True)
+
+    print("\n--- Phase 2: Generating Simulation Data ---")
+    true_target_trajectories, observer_trajectory, radar_measurements_per_step = \
+        data_generator.generate_full_dataset(cfg)
+
+    print(f"Generated {len(radar_measurements_per_step)} frames of radar data.")
+    if radar_measurements_per_step and radar_measurements_per_step[0]:
+        print(f"Example measurements in first frame ({len(radar_measurements_per_step[0])} points): {radar_measurements_per_step[0][:3]}")
+    elif radar_measurements_per_step:
+        print("First frame has 0 measurements.")
+
+    tracker = Tracker()
+    all_steps_estimated_tracks_history = []
+
+    print("\n--- Phase 3 & 4: Detection and Tracking ---")
+    for k in range(len(radar_measurements_per_step)):
+        current_time = k * cfg.TIME_STEP
+        observer_state_k = observer_trajectory[k]
+        raw_measurements_polar_k = radar_measurements_per_step[k]
+
+        detected_targets_global_cartesian_k = detector.detect_targets_by_clustering(
+            raw_measurements_polar_k,
+            observer_state_k,
+            cfg
+        )
+        
+        current_estimated_tracks = tracker.step(
+            detected_targets_global_cartesian_k,
+            raw_measurements_polar_k,
+            observer_state_k,
+            current_time
+        )
+        all_steps_estimated_tracks_history.append(current_estimated_tracks)
+
+        if (k + 1) % (len(radar_measurements_per_step) // 10 or 1) == 0:
+            num_raw = len(raw_measurements_polar_k)
+            num_dbscan_detected = len(detected_targets_global_cartesian_k)
+            
+            num_confirmed_tracks = 0
+            num_tentative_tracks = 0
+            if current_estimated_tracks: # 检查列表是否为空
+                num_confirmed_tracks = sum(1 for track_info in current_estimated_tracks if track_info['current_state_str'] == 'Confirmed')
+                num_tentative_tracks = sum(1 for track_info in current_estimated_tracks if track_info['current_state_str'] == 'Tentative')
+
+            print(f"  Time {current_time:.1f}s: RawMeas={num_raw}, DBSCAN_Dets={num_dbscan_detected}, ConfTracks={num_confirmed_tracks}, TentTracks={num_tentative_tracks}")
+
+    print("\n--- Phase 5: Visualization ---")
+    visualizer.plot_trajectories_and_measurements(
+        observer_trajectory,
+        true_target_trajectories,
+        radar_measurements_per_step,
+        # detected_points_global_over_time=all_detected_points_global_over_time, # 如果需要单独画DBSCAN输出
+        estimated_target_trajectories_over_time=all_steps_estimated_tracks_history
+    )
+
+    print("\nSimulation complete.")
+    plt.show()
 
 if __name__ == "__main__":
-    main()
+    run_simulation()

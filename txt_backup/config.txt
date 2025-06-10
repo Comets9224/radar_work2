@@ -1,0 +1,142 @@
+# config.py
+import numpy as np
+# from modules import data_generator # 不能在config中导入modules，会导致循环依赖
+
+# --- 阶段一：场景与信号模型建立 ---
+SCENE_TYPE = 'car'
+TOTAL_SIMULATION_TIME = 20
+TIME_STEP = 0.1
+DT = TIME_STEP
+
+OBSERVER_INITIAL_STATE = np.array([0, 0, 10, 0])
+OBSERVER_LENGTH = 4.5
+OBSERVER_WIDTH = 1.8
+OBSERVER_COLOR = 'blue'
+OBSERVER_LABEL = 'Ego Vehicle'
+
+NUM_TARGETS = 2
+
+TARGET_1_INITIAL_STATE = np.array([20, 5, 1, 0.5])
+TARGET_1_MOTION_MODEL = 'CV'
+TARGET_1_COLOR = 'red'
+TARGET_1_LABEL = 'Pedestrian 1 (CV)'
+
+TARGET_2_INITIAL_STATE_FULL = np.array([25, -3, -0.5, 0.2, -0.1, 0.05])
+TARGET_2_MOTION_MODEL = 'CA'
+TARGET_2_COLOR = 'green'
+TARGET_2_LABEL = 'Pedestrian 2 (CA)'
+
+TARGET_INITIAL_STATES = [
+    TARGET_1_INITIAL_STATE,
+    TARGET_2_INITIAL_STATE_FULL[:4]
+]
+TARGET_MOTION_MODELS = [TARGET_1_MOTION_MODEL, TARGET_2_MOTION_MODEL]
+TARGET_COLORS = [TARGET_1_COLOR, TARGET_2_COLOR]
+TARGET_LABELS = [TARGET_1_LABEL, TARGET_2_LABEL]
+
+TARGET_CA_INITIAL_STATES_FULL = {
+    1: TARGET_2_INITIAL_STATE_FULL
+}
+
+PLOT_AREA_X_MIN = -10
+PLOT_AREA_X_MAX = 80
+PLOT_AREA_Y_MIN = -30
+PLOT_AREA_Y_MAX = 30
+
+RADAR_MAX_RANGE = 70.0
+RADAR_MIN_RANGE = 3.0
+RADAR_FOV_DEG = 90
+RADAR_FOV_RAD = np.deg2rad(RADAR_FOV_DEG)
+
+SIGMA_RANGE = 0.5
+SIGMA_AZIMUTH = np.deg2rad(1.5)
+SIGMA_RADIAL_VELOCITY = 0.2
+
+# --- 任务1.3：目标运动模型与观测模型参数 ---
+q_cv_accel_noise_std = 0.5 # m/s^2
+Q_CV_MATRIX = np.array([ # 直接存储矩阵，而不是函数
+    [DT**4/4, 0,       DT**3/2, 0      ],
+    [0,       DT**4/4, 0,       DT**3/2],
+    [DT**3/2, 0,       DT**2,   0      ],
+    [0,       DT**3/2, 0,       DT**2  ]
+]) * q_cv_accel_noise_std**2
+
+q_ca_jerk_noise_std = 0.1 # m/s^3
+Q_CA_MATRIX = np.array([ # 直接存储矩阵
+    [DT**6/36, 0,        DT**5/12, 0,        DT**4/6, 0       ],
+    [0,        DT**6/36, 0,        DT**5/12, 0,       DT**4/6 ],
+    [DT**5/12, 0,        DT**4/4,  0,        DT**3/2, 0       ],
+    [0,        DT**5/12, 0,        DT**4/4,  0,       DT**3/2 ],
+    [DT**4/6,  0,        DT**3/2,  0,        DT**2,   0       ],
+    [0,        DT**4/6,  0,        DT**3/2,  0,       DT**2   ]
+]) * q_ca_jerk_noise_std**2
+
+R_MEASUREMENT = np.diag([SIGMA_RANGE**2, SIGMA_AZIMUTH**2, SIGMA_RADIAL_VELOCITY**2])
+
+# --- 辅助函数，用于根据模型类型获取F和Q的生成函数 ---
+# 注意：这些函数现在直接返回矩阵，因为dt是固定的。
+# 如果dt是变化的，那么应该返回函数。
+# 为了与 EKF 的 __init__ 签名保持一致（期望是函数），我们将在 Track 类中用 lambda 包装。
+# 或者，更简洁的方式是让 EKF 直接接收 F 和 Q 矩阵（如果它们不随时间变化）。
+# 我们暂时保持 EKF 接收函数，并在 Track 中包装。
+
+def get_model_matrices(model_type, dt_val):
+    """
+    根据模型类型返回状态转移矩阵F和过程噪声协方差Q。
+    注意：这里的Q是基于config中定义的标准差和dt_val计算的。
+    """
+    if model_type == 'CV':
+        F = np.array([[1, 0, dt_val, 0],
+                      [0, 1, 0, dt_val],
+                      [0, 0, 1, 0],
+                      [0, 0, 0, 1]])
+        Q = np.array([
+            [dt_val**4/4, 0,           dt_val**3/2, 0          ],
+            [0,           dt_val**4/4, 0,           dt_val**3/2],
+            [dt_val**3/2, 0,           dt_val**2,   0          ],
+            [0,           dt_val**3/2, 0,           dt_val**2  ]
+        ]) * q_cv_accel_noise_std**2
+        return F, Q
+    elif model_type == 'CA':
+        F = np.array([[1, 0, dt_val, 0, 0.5*dt_val**2, 0],
+                      [0, 1, 0, dt_val, 0, 0.5*dt_val**2],
+                      [0, 0, 1, 0, dt_val, 0],
+                      [0, 0, 0, 1, 0, dt_val],
+                      [0, 0, 0, 0, 1, 0],
+                      [0, 0, 0, 0, 0, 1]])
+        Q = np.array([
+            [dt_val**6/36, 0,            dt_val**5/12, 0,            dt_val**4/6, 0           ],
+            [0,            dt_val**6/36, 0,            dt_val**5/12, 0,           dt_val**4/6 ],
+            [dt_val**5/12, 0,            dt_val**4/4,  0,            dt_val**3/2, 0           ],
+            [0,            dt_val**5/12, 0,            dt_val**4/4,  0,           dt_val**3/2 ],
+            [dt_val**4/6,  0,            dt_val**3/2,  0,            dt_val**2,   0           ],
+            [0,            dt_val**4/6,  0,            dt_val**3/2,  0,           dt_val**2   ]
+        ]) * q_ca_jerk_noise_std**2
+        return F, Q
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+
+# -------------------- 阶段二：雷达数据仿真参数 --------------------
+PROB_DETECTION = 0.90
+CLUTTER_RATE = 5
+
+# -------------------- 阶段三：检测器参数 (DBSCAN) --------------------
+DBSCAN_EPS = 3.0
+DBSCAN_MIN_SAMPLES = 2
+
+# -------------------- 阶段四：跟踪器参数 --------------------
+GATING_THRESHOLD = 11.345 # 卡方分布，3自由度 (r, theta, vr), 99% 置信度
+                          # 或者 7.815 for 95%
+M_CONFIRM = 3
+N_CONFIRM = 5
+MAX_CONSECUTIVE_MISSES = 3
+
+OUTPUT_DIR = "output"
+OUTPUT_DATA_DIR = f"{OUTPUT_DIR}/data"
+OUTPUT_PLOTS_DIR = f"{OUTPUT_DIR}/plots"
+
+print("--- Configuration Loaded ---")
+# ... (其他打印语句保持不变) ...
+print(f"CV Model Process Noise Q_CV (for dt={DT}s, q_accel_std={q_cv_accel_noise_std}) = \n{get_model_matrices('CV', DT)[1]}")
+print(f"CA Model Process Noise Q_CA (for dt={DT}s, q_jerk_std={q_ca_jerk_noise_std}) = \n{get_model_matrices('CA', DT)[1]}")
+print("--------------------------\n")
