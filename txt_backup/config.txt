@@ -1,4 +1,4 @@
-# File processed on: 2025-06-21 17:45:46
+# File processed on: 2025-06-21 23:16:15
 
 # config.py
 import numpy as np
@@ -43,7 +43,7 @@ R_MEASUREMENT = np.diag([SIGMA_RANGE**2, np.deg2rad(SIGMA_AZIMUTH_DEG)**2, SIGMA
 
 # --- 检测器参数 (DBSCAN) ---
 DBSCAN_EPS = 3.0
-DBSCAN_MIN_SAMPLES = 1
+DBSCAN_MIN_SAMPLES = 2
 
 # --- 跟踪器参数 ---
 GATING_THRESHOLD_EUCLIDEAN = 5.0
