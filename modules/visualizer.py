@@ -110,4 +110,3 @@ def plot_results(observer_trajectory, true_target_trajectories,
     plot_path = os.path.join(cfg.OUTPUT_PLOTS_DIR, "final_tracking_result.png")
     plt.savefig(plot_path, facecolor='black', dpi=200, bbox_inches='tight')
     print(f"\nFinal plot saved to: {plot_path}")
-    # plt.show() 
