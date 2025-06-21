@@ -1,50 +1,80 @@
 # modules/track.py
 import numpy as np
 from .kalman_filter import ExtendedKalmanFilter
-import config as cfg
+import config as cfg  # Assuming config.py is in the parent directory or accessible
+
 
 class Track:
-    _next_id = 1
-    def __init__(self, initial_measurement, observer_state, dt):
+    _next_id = 1  # 类变量，用于生成唯一的航迹ID
+
+    def __init__(self, initial_detection_info, observer_state_at_init, dt):
+        """
+        初始化一个新航迹。
+        :param initial_detection_info: 来自检测器的信息字典，包含
+                                       'position_global': [px_g, py_g]
+                                       'measurements_polar': [[r, theta, vr], ...] (取第一个作为初始测量)
+        :param observer_state_at_init: 航迹初始化时刻的观测者状态 [px, py, vx, vy]
+        :param dt: 时间步长
+        """
         self.track_id = Track._next_id
         Track._next_id += 1
-        self.age = 1
-        self.hits = 1
-        self.misses = 0
-        self.state = 'Tentative'
-        self.history = []
 
-        r, theta_local, _ = initial_measurement
-        obs_px, obs_py, obs_vx, obs_vy = observer_state.flatten()
-        obs_heading = np.arctan2(obs_vy, obs_vx)
-        x_rel = r * np.cos(theta_local)
-        y_rel = r * np.sin(theta_local)
-        px_g = obs_px + x_rel * np.cos(obs_heading) - y_rel * np.sin(obs_heading)
-        py_g = obs_py + x_rel * np.sin(obs_heading) + y_rel * np.cos(obs_heading)
-        x_init = np.array([[px_g], [py_g], [0.0], [0.0]])
-        pos_var = cfg.R_MEASUREMENT[0, 0] * 4
-        vel_var = 50**2
-        P_init = np.diag([pos_var, pos_var, vel_var, vel_var])
+        self.age = 1  # 航迹的年龄（帧数）
+        self.hits = 1  # 连续命中次数 (初始化时算一次命中)
+        self.misses = 0  # 连续丢失次数
+        self.state = 'Tentative'  # 航迹状态: 'Tentative' (暂定) 或 'Confirmed' (已确认)
+        self.history = []  # 存储每个时间步的状态估计 [px, py, vx, vy]
+
+        # 从 initial_detection_info 中获取全局位置
+        px_g_init, py_g_init = initial_detection_info['position_global']
+
+        # 初始速度可以设为0，或者从第一个测量中粗略估计（如果径向速度可用）
+        # 为简单起见，先设为0。更复杂的初始化可以基于多个初始点。
+        vx_g_init = 0.0
+        vy_g_init = 0.0
+
+        # 初始状态向量 [px, py, vx, vy]'
+        x_init = np.array([[px_g_init], [py_g_init], [vx_g_init], [vy_g_init]])
+
+        # 初始协方差矩阵 P_init
+        # 位置不确定性可以基于DBSCAN的eps参数，速度不确定性可以设得较大
+        pos_variance_init = (cfg.DBSCAN_EPS * 1.5) ** 2  # 初始位置不确定性，可以比eps稍大
+        vel_variance_init = 20.0 ** 2  # 假设初始速度不确定性较大 (e.g., 20 m/s std dev)
+        P_init = np.diag([pos_variance_init, pos_variance_init, vel_variance_init, vel_variance_init])
+
+        # 获取CV模型的F和Q矩阵 (假设所有航迹都用CV模型进行跟踪)
         F_func, Q_func = cfg.get_model_functions('CV')
-        F, Q = F_func(dt), Q_func(dt)
-        self.kf = ExtendedKalmanFilter(x_init, P_init, F, Q, cfg.R_MEASUREMENT)
-        self.history.append(self.kf.x.flatten().copy())
+        F_matrix = F_func(dt)
+        Q_matrix = Q_func(dt)  # 使用config中为CV模型定义的Q
+
+        self.kf = ExtendedKalmanFilter(x_init, P_init, F_matrix, Q_matrix, cfg.R_MEASUREMENT)
+        self.history.append(self.kf.x.flatten().copy())  # 存储初始状态
 
     def predict(self):
         self.age += 1
         self.kf.predict()
+        # 预测后不立即记录历史，等待更新或标记丢失后再记录
 
-    def update(self, measurement, observer_state):
-        if self.kf.update(measurement, observer_state):
+    def update(self, measurement_polar, observer_state):
+        # measurement_polar 是一个单独的测量 [r, theta_local, vr]
+        if self.kf.update(measurement_polar, observer_state):
             self.hits += 1
-            self.misses = 0
+            self.misses = 0  # 重置未命中计数
         else:
-            self.mark_missed()
-        self.history.append(self.kf.x.flatten().copy())
+            # 更新失败，可能因为雅可比计算问题或测量无效
+            self.mark_missed()  # 标记为未命中
+        self.history.append(self.kf.x.flatten().copy())  # 更新（或未更新但标记为丢失）后记录状态
 
     def mark_missed(self):
         self.misses += 1
+        self.hits = 0  # 如果允许在丢失几帧后恢复，则不重置hits；如果严格，则重置
+        # 即使未命中，也记录下预测的状态作为当前历史
         self.history.append(self.kf.x.flatten().copy())
 
     def get_predicted_position(self):
+        # 返回预测的全局位置 [px, py]
         return self.kf.x[:2].flatten()
+
+    def get_current_estimate(self):
+        # 返回当前最新的状态估计
+        return self.kf.x.flatten()

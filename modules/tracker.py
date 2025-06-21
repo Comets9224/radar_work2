@@ -4,55 +4,118 @@ from scipy.optimize import linear_sum_assignment
 from .track import Track
 import config as cfg
 
+
 class Tracker:
     def __init__(self):
         self.tracks = []
         self.dt = cfg.DT
 
-    def _calculate_cost_matrix(self, tracks, detected_clusters):
+    def _calculate_cost_matrix(self, tracks, detected_clusters_info):
+        """
+        计算航迹与检测之间的代价矩阵。
+        :param tracks: 当前活动航迹列表
+        :param detected_clusters_info: 当前帧检测到的目标信息列表
+                                     每个元素是 {'position_global': [px,py], 'measurements_polar': [[r,theta,vr],...]}
+        :return: 代价矩阵
+        """
         num_tracks = len(tracks)
-        num_detections = len(detected_clusters)
+        num_detections = len(detected_clusters_info)
         cost_matrix = np.full((num_tracks, num_detections), np.inf)
+
         for i, track in enumerate(tracks):
-            track_pos = track.get_predicted_position()
-            for j, cluster in enumerate(detected_clusters):
-                det_pos = cluster['position_global']
-                dist = np.linalg.norm(track_pos - det_pos)
+            track_predicted_pos_global = track.get_predicted_position()
+
+            for j, cluster_info in enumerate(detected_clusters_info):
+                detection_pos_global = np.array(cluster_info['position_global'])
+                dist = np.linalg.norm(track_predicted_pos_global - detection_pos_global)
+
                 if dist < cfg.GATING_THRESHOLD_EUCLIDEAN:
                     cost_matrix[i, j] = dist
         return cost_matrix
 
     def _manage_tracks(self):
+        """管理航迹的生命周期：确认、删除"""
         tracks_to_keep = []
         for track in self.tracks:
-            if track.misses > cfg.MAX_CONSECUTIVE_MISSES: continue
+            if track.misses > cfg.MAX_CONSECUTIVE_MISSES:
+                continue
+
             if track.state == 'Tentative' and track.hits >= cfg.M_CONFIRM:
                 track.state = 'Confirmed'
-            if track.state == 'Tentative' and track.age > cfg.N_CONFIRM_AGE: continue
+
+            if track.state == 'Tentative' and track.age > cfg.N_CONFIRM_AGE and track.hits < cfg.M_CONFIRM:
+                continue
+
             tracks_to_keep.append(track)
         self.tracks = tracks_to_keep
 
-    def step(self, detected_clusters_info, observer_state):
-        for track in self.tracks:
-            track.predict()
-        cost_matrix = self._calculate_cost_matrix(self.tracks, detected_clusters_info)
-        track_indices, detection_indices = linear_sum_assignment(cost_matrix)
-        matched_track_indices = set()
-        matched_detection_indices = set()
-        for i, j in zip(track_indices, detection_indices):
-            if cost_matrix[i, j] < cfg.GATING_THRESHOLD_EUCLIDEAN:
-                cluster = detected_clusters_info[j]
-                measurement_to_update = cluster['measurements_polar'][0]
-                self.tracks[i].update(measurement_to_update, observer_state)
-                matched_track_indices.add(i)
-                matched_detection_indices.add(j)
-        for i, track in enumerate(self.tracks):
-            if i not in matched_track_indices:
-                track.mark_missed()
-        for j, cluster in enumerate(detected_clusters_info):
-            if j not in matched_detection_indices:
-                measurement_to_init = cluster['measurements_polar'][0]
-                new_track = Track(measurement_to_init, observer_state, self.dt)
+    def step(self, detected_clusters_info_current_frame, current_observer_state):
+        """
+        跟踪器的主步骤。
+        :param detected_clusters_info_current_frame: 当前帧检测到的目标信息列表
+        :param current_observer_state: 当前观测者状态
+        :return: 当前所有活动航迹的信息列表
+        """
+        for track_obj in self.tracks:  # Renamed track to track_obj to avoid conflict with module name
+            track_obj.predict()
+
+        track_indices, detection_indices = np.array([]), np.array([])
+        cost_matrix = None
+
+        if self.tracks and detected_clusters_info_current_frame:
+            cost_matrix = self._calculate_cost_matrix(self.tracks, detected_clusters_info_current_frame)
+            # 检查代价矩阵是否可行（至少有一个有限值）
+            if self.tracks and detected_clusters_info_current_frame:
+                cost_matrix = self._calculate_cost_matrix(self.tracks, detected_clusters_info_current_frame)
+                # 检查代价矩阵是否可行
+                if cost_matrix.size > 0 and np.any(np.isfinite(cost_matrix)):
+                    try:
+                        track_indices, detection_indices = linear_sum_assignment(cost_matrix)
+                    except ValueError:
+                        # 如果仍然失败，设为空数组
+                        track_indices, detection_indices = np.array([]), np.array([])
+                else:
+                    track_indices, detection_indices = np.array([]), np.array([])
+            else:
+                track_indices, detection_indices = np.array([]), np.array([])
+                cost_matrix = None
+
+        matched_track_indices_set = set()
+        matched_detection_indices_set = set()
+
+        # 只有当有匹配且代价矩阵存在时才处理匹配
+        if len(track_indices) > 0 and cost_matrix is not None:
+            for i, j in zip(track_indices, detection_indices):
+                if cost_matrix[i, j] < cfg.GATING_THRESHOLD_EUCLIDEAN:
+                    cluster_info = detected_clusters_info_current_frame[j]
+                    if cluster_info['measurements_polar']:  # 确保有极坐标测量值
+                        # 通常使用聚类中的一个代表性测量，或者如果Kalman滤波器能处理多个测量，则可以传递所有
+                        # 这里我们取第一个作为代表
+                        measurement_to_update_with = cluster_info['measurements_polar'][0]
+                        self.tracks[i].update(measurement_to_update_with, current_observer_state)
+                        matched_track_indices_set.add(i)
+                        matched_detection_indices_set.add(j)
+
+        for i, track_obj in enumerate(self.tracks):
+            if i not in matched_track_indices_set:
+                track_obj.mark_missed()
+
+        for j, cluster_info in enumerate(detected_clusters_info_current_frame):
+            if j not in matched_detection_indices_set:
+                # cluster_info 包含 'position_global' 和 'measurements_polar'
+                new_track = Track(cluster_info, current_observer_state, self.dt)
                 self.tracks.append(new_track)
+
         self._manage_tracks()
-        return [{'id': t.track_id, 'history': t.history, 'state': t.state} for t in self.tracks]
+
+        current_tracks_info = []
+        for t in self.tracks:
+            current_tracks_info.append({
+                'id': t.track_id,
+                'history': t.history,
+                'state': t.state,
+                'age': t.age,
+                'hits': t.hits,
+                'misses': t.misses
+            })
+        return current_tracks_info

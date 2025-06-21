@@ -5,78 +5,75 @@ import matplotlib.pyplot as plt
 import config as cfg
 from modules import data_generator, detector, visualizer
 from modules.tracker import Tracker
+from modules.track import Track  # Import Track to reset _next_id if needed
 
 
 def run_simulation():
     """主仿真函数，调度所有模块"""
-    # 打印配置和模型信息
-    # cfg.print_config_summary() # 如果您在config.py中实现了这个函数
+    # cfg.print_config_summary() # 取消注释以打印配置
     data_generator.print_motion_equations()
     print("\nStarting Radar Target Detection and Tracking System Simulation...")
 
-    # --- 准备输出目录 ---
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     os.makedirs(cfg.OUTPUT_DATA_DIR, exist_ok=True)
     os.makedirs(cfg.OUTPUT_PLOTS_DIR, exist_ok=True)
 
-    # --- 阶段二：生成仿真数据 ---
     print("\n--- Phase 2: Generating Simulation Data ---")
-    true_trajs, obs_traj, measurements_per_step = data_generator.generate_full_dataset(cfg)
-    print(f"Generated {len(measurements_per_step)} frames of data.")
+    true_target_trajs, obs_traj, measurements_per_step_polar = data_generator.generate_full_dataset(cfg)
+    print(f"Generated {len(measurements_per_step_polar)} frames of data.")
 
-    # --- 阶段三 & 四：检测与跟踪 ---
     print("\n--- Phase 3 & 4: Detection and Tracking ---")
+    Track._next_id = 1  # 重置航迹ID计数器，以便每次仿真从1开始
     tracker = Tracker()
-    all_detections_over_time = []
-    all_tracks_over_time = []
+    all_detections_info_over_time = []
+    all_tracks_info_over_time = []
 
-    for k in range(len(measurements_per_step)):
+    for k in range(len(measurements_per_step_polar)):
         current_time = k * cfg.DT
         observer_state_k = obs_traj[k]
-        raw_measurements_polar_k = measurements_per_step[k]
+        raw_measurements_polar_k_current_step = measurements_per_step_polar[k]
 
-        # 阶段三: 检测
-        detected_clusters_k = detector.detect_targets_by_clustering(
-            raw_measurements_polar_k,
+        detected_clusters_info_k = detector.detect_targets_by_clustering(
+            raw_measurements_polar_k_current_step,
             observer_state_k,
             cfg
         )
-        all_detections_over_time.append(detected_clusters_k)
+        all_detections_info_over_time.append(detected_clusters_info_k)
 
-        # 阶段四: 跟踪
-        tracked_info_k = tracker.step(
-            detected_clusters_k,
+        tracked_info_for_frame_k = tracker.step(
+            detected_clusters_info_k,
             observer_state_k
         )
-        all_tracks_over_time.append(tracked_info_k)
+        all_tracks_info_over_time.append(tracked_info_for_frame_k)
 
-        # 每隔20帧打印一次进度
-        if (k + 1) % 20 == 0 or k == len(measurements_per_step) - 1:
-            num_raw = len(raw_measurements_polar_k)
-            num_clusters = len(detected_clusters_k)
+        if (k + 1) % 20 == 0 or k == len(measurements_per_step_polar) - 1:
+            num_raw = len(raw_measurements_polar_k_current_step)
+            num_detected_clusters = len(detected_clusters_info_k)
             num_active_tracks = len(tracker.tracks)
-            num_confirmed = sum(1 for t in tracker.tracks if t.state == 'Confirmed')
+            num_confirmed = sum(
+                1 for t_info in tracked_info_for_frame_k if t_info['state'] == 'Confirmed')  # 从返回的info中统计
             print(
-                f"  Time {current_time:.1f}s: RawMeas={num_raw}, Detections={num_clusters}, ActiveTracks={num_active_tracks} (Confirmed={num_confirmed})")
+                f"  Time {current_time:.1f}s: RawMeas={num_raw}, Detections={num_detected_clusters}, ActiveTracks={num_active_tracks} (Confirmed={num_confirmed})")
 
-    # --- 阶段五：可视化 ---
     print("\n--- Phase 5: Visualization ---")
 
-    # 从最后一帧的跟踪结果中提取每个航迹的完整历史用于绘图
-    final_tracks_for_plot = []
-    if all_tracks_over_time and all_tracks_over_time[-1]:
-        final_tracks_for_plot = all_tracks_over_time[-1]
+    detections_for_plot_global_xy = []
+    for frame_detections_info in all_detections_info_over_time:
+        current_frame_xy_detections = []
+        for det_info in frame_detections_info:
+            current_frame_xy_detections.append(det_info['position_global'])
+        detections_for_plot_global_xy.append(current_frame_xy_detections)
 
     visualizer.plot_results(
         observer_trajectory=obs_traj,
-        true_target_trajectories=true_trajs,
-        measurements_over_time=measurements_per_step,
-        detections_over_time=all_detections_over_time,
-        tracks_over_time=final_tracks_for_plot
+        true_target_trajectories=true_target_trajs,
+        measurements_over_time_polar=measurements_per_step_polar,
+        detections_over_time_global_xy_list_of_lists=detections_for_plot_global_xy,
+        all_tracks_info_over_time=all_tracks_info_over_time
     )
 
     print("\nSimulation complete. Plot saved in 'output/plots/' directory.")
-    # plt.show() # 如果希望在运行时立即显示图像，可以取消此行注释
+    # plt.show()
 
 
 if __name__ == '__main__':

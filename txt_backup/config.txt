@@ -1,146 +1,61 @@
-# File processed on: 2025-06-21 16:56:45
+# File processed on: 2025-06-21 17:45:46
 
 # config.py
 import numpy as np
-import os # 移到文件顶部
+import os
 
-# -------------------- 阶段一：场景与信号模型建立 --------------------
-# 任务1.1：定义场景与坐标系
-SCENE_TYPE = 'car'
+# --- 核心参数 ---
+DT = 0.1  # 统一的时间步长 (s)
+TOTAL_SIMULATION_TIME = 20 # (s)
 
-TOTAL_SIMULATION_TIME = 20  # 秒
-TIME_STEP = 0.1             # 秒 (雷达扫描周期/采样时间间隔 dt)
-DT = TIME_STEP              # 使用统一的时间步长符号
-
-# --- 观测者（雷达搭载平台：自动驾驶汽车）运动参数 ---
-OBSERVER_INITIAL_STATE = np.array([0, 0, 10, 0]) # [px, py, vx, vy] (米, 米/秒)
-OBSERVER_LENGTH = 4.5  # 米
-OBSERVER_WIDTH = 1.8   # 米
-OBSERVER_COLOR = 'blue'
-OBSERVER_LABEL = 'Ego Vehicle'
-
-# --- 目标参数 ---
-NUM_TARGETS = 2
-
-TARGET_1_INITIAL_STATE = np.array([20, 5, 1, 0.5])
-TARGET_1_MOTION_MODEL = 'CV' # Constant Velocity
-TARGET_1_COLOR = 'red'
-TARGET_1_LABEL = 'Pedestrian 1 (CV)'
-
-TARGET_2_INITIAL_STATE_FULL = np.array([25, -3, -0.5, 0.2, -0.1, 0.05]) # px, py, vx, vy, ax, ay
-TARGET_2_MOTION_MODEL = 'CA' # Constant Acceleration
-TARGET_2_COLOR = 'green'
-TARGET_2_LABEL = 'Pedestrian 2 (CA)'
-
-TARGET_INITIAL_STATES = [
-    TARGET_1_INITIAL_STATE,
-    TARGET_2_INITIAL_STATE_FULL[:4]
+# --- 场景与目标配置 ---
+OBSERVER_INITIAL_STATE = np.array([[0], [0], [10], [0]])  # [px, py, vx, vy]
+TARGETS_CONFIG = [
+    {'initial_state': np.array([[20], [5], [1], [0.5]]), 'model': 'CV'},
+    {'initial_state': np.array([[25], [-3], [-0.5], [0.2], [-0.1], [0.05]]), 'model': 'CA'}
 ]
-TARGET_MOTION_MODELS = [TARGET_1_MOTION_MODEL, TARGET_2_MOTION_MODEL]
-TARGET_COLORS = [TARGET_1_COLOR, TARGET_2_COLOR]
-TARGET_LABELS = [TARGET_1_LABEL, TARGET_2_LABEL]
+TARGET_COLORS = ['#FF0000', '#00FF00', '#00FFFF', '#FFFF00', '#FFA500', '#FF00FF'] # Red, Green, Cyan, etc.
 
-TARGET_CA_INITIAL_STATES_FULL = {
-    1: TARGET_2_INITIAL_STATE_FULL
-}
-
-# --- 可视化参数 ---
-PLOT_AREA_X_MIN = -10
-PLOT_AREA_X_MAX = 80
-PLOT_AREA_Y_MIN = -30
-PLOT_AREA_Y_MAX = 30
-
-# --- 任务1.2：简化雷达模型参数 ---
-RADAR_MAX_RANGE = 70.0
-RADAR_MIN_RANGE = 2.0
-RADAR_FOV_DEG = 90
-RADAR_FOV_RAD = np.deg2rad(RADAR_FOV_DEG)
-
-# 观测噪声标准差 (对应分辨率/精度)
-SIGMA_RANGE = 0.5
-SIGMA_AZIMUTH = np.deg2rad(1.5)
-SIGMA_RADIAL_VELOCITY = 0.2
-
-# --- 任务1.3：目标运动模型与观测模型参数 ---
-
-# 过程噪声参数 (这些需要在 get_model_matrices 函数之前定义)
-q_cv_accel_noise_std = 0.5  # CV模型中等效的加速度白噪声标准差 (m/s^2)
-q_ca_jerk_noise_std = 0.1   # CA模型中等效的加加速度(jerk)白噪声标准差 (m/s^3)
-
-def get_model_matrices(model_type, dt_val):
-    """
-    根据模型类型返回状态转移矩阵F和过程噪声协方差Q。
-    """
+# --- 运动模型 ---
+def get_model_functions(model_type):
     if model_type == 'CV':
-        F = np.array([[1, 0, dt_val, 0],
-                      [0, 1, 0, dt_val],
-                      [0, 0, 1, 0],
-                      [0, 0, 0, 1]])
-        Q = np.array([
-            [dt_val**4/4, 0,           dt_val**3/2, 0          ],
-            [0,           dt_val**4/4, 0,           dt_val**3/2],
-            [dt_val**3/2, 0,           dt_val**2,   0          ],
-            [0,           dt_val**3/2, 0,           dt_val**2  ]
-        ]) * q_cv_accel_noise_std**2
+        q_std = 0.5
+        F = lambda dt: np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]])
+        Q = lambda dt: np.array([[dt**4/4, 0, dt**3/2, 0], [0, dt**4/4, 0, dt**3/2], [dt**3/2, 0, dt**2, 0], [0, dt**3/2, 0, dt**2]]) * q_std**2
         return F, Q
     elif model_type == 'CA':
-        F = np.array([[1, 0, dt_val, 0, 0.5*dt_val**2, 0],
-                      [0, 1, 0, dt_val, 0, 0.5*dt_val**2],
-                      [0, 0, 1, 0, dt_val, 0],
-                      [0, 0, 0, 1, 0, dt_val],
-                      [0, 0, 0, 0, 1, 0],
-                      [0, 0, 0, 0, 0, 1]])
-        Q = np.array([
-            [dt_val**6/36, 0,            dt_val**5/12, 0,            dt_val**4/6, 0           ],
-            [0,            dt_val**6/36, 0,            dt_val**5/12, 0,           dt_val**4/6 ],
-            [dt_val**5/12, 0,            dt_val**4/4,  0,            dt_val**3/2, 0           ],
-            [0,            dt_val**5/12, 0,            dt_val**4/4,  0,           dt_val**3/2 ],
-            [dt_val**4/6,  0,            dt_val**3/2,  0,            dt_val**2,   0           ],
-            [0,            dt_val**4/6,  0,            dt_val**3/2,  0,           dt_val**2   ]
-        ]) * q_ca_jerk_noise_std**2
+        q_std = 0.1
+        F = lambda dt: np.array([[1, 0, dt, 0, 0.5*dt**2, 0], [0, 1, 0, dt, 0, 0.5*dt**2], [0, 0, 1, 0, dt, 0], [0, 0, 0, 1, 0, dt], [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 1]])
+        Q = lambda dt: np.eye(6) * q_std**2
         return F, Q
-    else:
-        raise ValueError(f"Unknown model type for get_model_matrices: {model_type}")
+    raise ValueError(f"Unknown model type: {model_type}")
 
-# 观测噪声协方差矩阵 R (用于EKF)
-R_MEASUREMENT = np.diag([SIGMA_RANGE**2, SIGMA_AZIMUTH**2, SIGMA_RADIAL_VELOCITY**2])
-
-# -------------------- 阶段二：雷达数据仿真参数 --------------------
-PROB_DETECTION = 0.90
+# --- 雷达参数 ---
+RADAR_MAX_RANGE = 70.0
+RADAR_MIN_RANGE = 2.0
+RADAR_FOV_DEG = 90.0
+PROB_DETECTION = 0.9
 CLUTTER_RATE = 5
+SIGMA_RANGE = 0.5
+SIGMA_AZIMUTH_DEG = 1.0
+SIGMA_VR = 0.2
+R_MEASUREMENT = np.diag([SIGMA_RANGE**2, np.deg2rad(SIGMA_AZIMUTH_DEG)**2, SIGMA_VR**2])
 
-# -------------------- 阶段三：检测器参数 (DBSCAN) --------------------
+# --- 检测器参数 (DBSCAN) ---
 DBSCAN_EPS = 3.0
-DBSCAN_MIN_SAMPLES = 2
+DBSCAN_MIN_SAMPLES = 1
 
-# -------------------- 阶段四：跟踪器参数 --------------------
-GATING_THRESHOLD = 7.815 # 卡方分布，3自由度, 95% 置信度
-
+# --- 跟踪器参数 ---
+GATING_THRESHOLD_EUCLIDEAN = 5.0
 M_CONFIRM = 3
-N_CONFIRM = 5
-MAX_CONSECUTIVE_MISSES = 3
+MAX_CONSECUTIVE_MISSES = 5
+N_CONFIRM_AGE = 5
 
-# --- 输出文件夹路径 ---
+# --- 输出路径 ---
 OUTPUT_DIR = "output"
 OUTPUT_DATA_DIR = os.path.join(OUTPUT_DIR, "data")
 OUTPUT_PLOTS_DIR = os.path.join(OUTPUT_DIR, "plots")
 
-# --- 打印关键配置信息 ---
 def print_config_summary():
     print("--- Configuration Loaded ---")
-    print(f"SCENE_TYPE: {SCENE_TYPE}")
-    print(f"TOTAL_SIMULATION_TIME: {TOTAL_SIMULATION_TIME}s, TIME_STEP: {TIME_STEP}s")
-    print(f"RADAR_MAX_RANGE: {RADAR_MAX_RANGE}m, RADAR_MIN_RANGE: {RADAR_MIN_RANGE}m, RADAR_FOV_DEG: {RADAR_FOV_DEG}°")
-    print(f"PROB_DETECTION: {PROB_DETECTION}, CLUTTER_RATE: {CLUTTER_RATE} per frame")
-    print(f"DBSCAN_EPS: {DBSCAN_EPS}, DBSCAN_MIN_SAMPLES: {DBSCAN_MIN_SAMPLES}")
-    print(f"GATING_THRESHOLD (Mahalanobis Sq.): {GATING_THRESHOLD}")
-    print(f"R_MEASUREMENT (diag variances): {[R_MEASUREMENT[0,0], R_MEASUREMENT[1,1], R_MEASUREMENT[2,2]]}")
-
-    _, Q_cv_example = get_model_matrices('CV', DT)
-    _, Q_ca_example = get_model_matrices('CA', DT)
-
-    print(f"CV Model Process Noise q_cv_accel_noise_std: {q_cv_accel_noise_std}")
-    # print(f"Q_CV (for dt={DT}s) = \n{Q_cv_example}") # 可以取消注释以查看
-    print(f"CA Model Process Noise q_ca_jerk_noise_std: {q_ca_jerk_noise_std}")
-    # print(f"Q_CA (for dt={DT}s) = \n{Q_ca_example}") # 可以取消注释以查看
-    print("--------------------------\n")
+    # ... (可以添加打印配置信息的代码)
