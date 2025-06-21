@@ -44,10 +44,10 @@ DBSCAN_EPS = 3.0
 DBSCAN_MIN_SAMPLES = 2
 
 # --- 跟踪器参数 ---
-GATING_THRESHOLD_EUCLIDEAN = 5.0  # 关联门限可以保持不变
-M_CONFIRM = 1  # 修改：命中2次就足以确认，让航迹更容易被确认
-MAX_CONSECUTIVE_MISSES = 10 # 修改：容忍更多次的连续漏检，让航迹不容易丢失
-N_CONFIRM_AGE = 10 # 修改：给暂定航迹更长的观察期来证明自己
+GATING_THRESHOLD_EUCLIDEAN = 5.0
+M_CONFIRM = 3
+MAX_CONSECUTIVE_MISSES = 5
+N_CONFIRM_AGE = 5
 
 # --- 输出路径 ---
 OUTPUT_DIR = "output"
