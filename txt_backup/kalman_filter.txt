@@ -1,142 +1,151 @@
-# File processed on: 2025-06-10 23:33:37
+# File processed on: 2025-06-21 16:56:45
 
 # modules/kalman_filter.py
 import numpy as np
 
 class ExtendedKalmanFilter:
     def __init__(self, x_init, P_init, F_func, Q_func, R_matrix, dt):
-        """
-        初始化扩展卡尔曼滤波器.
-        :param x_init: 初始状态向量 [px, py, vx, vy]^T (4x1列向量)
-        :param P_init: 初始状态协方差矩阵 (4x4)
-        :param F_func: 一个函数，输入dt，返回状态转移矩阵F (4x4)
-        :param Q_func: 一个函数，输入dt，返回过程噪声协方差矩阵Q (4x4)
-        :param R_matrix: 观测噪声协方差矩阵 (3x3 for [r, theta, vr])
-        :param dt: 时间步长
-        """
-        self.x = x_init.reshape(-1, 1) # 确保是列向量
+        self.x = x_init.reshape(-1, 1)
         self.P = P_init
         self.F_func = F_func
         self.Q_func = Q_func
         self.R = R_matrix
         self.dt = dt
-        self.I = np.eye(self.x.shape[0]) # 单位矩阵，维度与状态向量一致
+        self.I = np.eye(self.x.shape[0])
 
     def predict(self):
-        """ 对应任务4.2的预测步骤 """
         F = self.F_func(self.dt)
         Q = self.Q_func(self.dt)
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
 
     def hx(self, x_state, observer_state):
-        """
-        观测函数 h(x)，将状态向量转换为预测的观测向量。
-        :param x_state: 当前状态 [px, py, vx, vy]^T
-        :param observer_state: 观测者状态 [obs_px, obs_py, obs_vx, obs_vy]
-        :return: 预测的观测向量 [range, azimuth, radial_velocity]^T (3x1列向量)
-        """
         px, py, vx, vy = x_state[0, 0], x_state[1, 0], x_state[2, 0], x_state[3, 0]
         obs_px, obs_py, obs_vx, obs_vy = observer_state[0], observer_state[1], observer_state[2], observer_state[3]
 
-        delta_px = px - obs_px
-        delta_py = py - obs_py
+        delta_px_global = px - obs_px
+        delta_py_global = py - obs_py
 
-        range_val = np.sqrt(delta_px**2 + delta_py**2)
-        if range_val < 1e-6: # 避免除以零
-            range_val = 1e-6
+        # 观测者航向角
+        observer_heading_rad = np.arctan2(obs_vy, obs_vx) if not (np.isclose(obs_vx, 0) and np.isclose(obs_vy, 0)) else 0
 
-        azimuth = np.arctan2(delta_py, delta_px) # 全局方位角
+        # 目标在雷达局部坐标系下的相对位置
+        x_radar_rel = delta_px_global * np.cos(observer_heading_rad) + delta_py_global * np.sin(observer_heading_rad)
+        y_radar_rel = -delta_px_global * np.sin(observer_heading_rad) + delta_py_global * np.cos(observer_heading_rad)
 
-        # 径向速度: ( (vx - obs_vx)*delta_px + (vy - obs_vy)*delta_py ) / range_val
-        # 即目标相对速度在目标与观测者连线方向上的投影
-        relative_vx = vx - obs_vx
-        relative_vy = vy - obs_vy
-        radial_velocity = (relative_vx * delta_px + relative_vy * delta_py) / range_val
+        range_val = np.sqrt(x_radar_rel**2 + y_radar_rel**2)
+        if range_val < 1e-6: range_val = 1e-6
 
-        return np.array([[range_val], [azimuth], [radial_velocity]])
+        azimuth_local = np.arctan2(y_radar_rel, x_radar_rel)
+
+        # 径向速度
+        relative_vx_global = vx - obs_vx
+        relative_vy_global = vy - obs_vy
+        radial_velocity = (relative_vx_global * delta_px_global + relative_vy_global * delta_py_global) / range_val
+        # 或者在雷达局部坐标系下计算
+        # dvx_radar_rel = relative_vx_global * np.cos(observer_heading_rad) + relative_vy_global * np.sin(observer_heading_rad)
+        # dvy_radar_rel = -relative_vx_global * np.sin(observer_heading_rad) + relative_vy_global * np.cos(observer_heading_rad)
+        # radial_velocity = (x_radar_rel * dvx_radar_rel + y_radar_rel * dvy_radar_rel) / range_val
+
+
+        return np.array([[range_val], [azimuth_local], [radial_velocity]])
 
     def jacobian_H(self, x_state, observer_state):
-        """
-        计算观测函数 h(x) 的雅可比矩阵 H。
-        H = ∂h/∂x
-        观测向量 z = [range, azimuth, radial_velocity]^T
-        状态向量 x = [px, py, vx, vy]^T
-        """
         px, py, vx, vy = x_state[0, 0], x_state[1, 0], x_state[2, 0], x_state[3, 0]
         obs_px, obs_py, obs_vx, obs_vy = observer_state[0], observer_state[1], observer_state[2], observer_state[3]
+        
+        # 观测者航向角
+        phi = np.arctan2(obs_vy, obs_vx) if not (np.isclose(obs_vx, 0) and np.isclose(obs_vy, 0)) else 0
+        cos_phi = np.cos(phi)
+        sin_phi = np.sin(phi)
 
-        delta_px = px - obs_px
-        delta_py = py - obs_py
-        range_sq = delta_px**2 + delta_py**2
+        # 目标相对于观测者的全局坐标差值
+        delta_px_g = px - obs_px
+        delta_py_g = py - obs_py
+
+        # 目标在雷达局部坐标系下的相对位置
+        x_r = delta_px_g * cos_phi + delta_py_g * sin_phi
+        y_r = -delta_px_g * sin_phi + delta_py_g * cos_phi
+        
+        range_sq = x_r**2 + y_r**2
         range_val = np.sqrt(range_sq)
 
-        if range_val < 1e-6: # 避免除以零或得到非常大的雅可比值
-            # 返回一个零矩阵或一个合理的默认值，或者标记更新失败
-            # print("Warning: Jacobian H calculation - range is too small.")
-            return np.zeros((3, 4)) # 3x4因为观测是3维，状态是4维
+        # --- 在这里增加同样的保护性检查 ---
+        if range_val < 0.1: # 避免除以零 (与tracker中的门限一致或更小)
+            # print(f"Warning: Jacobian H calculation - range_val ({range_val:.3f}) is too small. State: {x_state.flatten()}, Obs: {observer_state}")
+            return np.zeros((3,4)) # 返回一个零矩阵，这将导致卡尔曼增益为零，状态不更新
+        # --- 检查结束 ---
 
-        # dr/dpx, dr/dpy, dr/dvx, dr/dvy
-        H_row1 = [delta_px/range_val, delta_py/range_val, 0, 0]
-        # dtheta/dpx, dtheta/dpy, dtheta/dvx, dtheta/dvy
-        H_row2 = [-delta_py/range_sq, delta_px/range_sq, 0, 0]
+        # 偏导数计算 (h = [range, theta_local, vr]^T, x = [px, py, vx, vy]^T)
+        # dr/dpx = (x_r * cos_phi - y_r * sin_phi) / range_val
+        # dr/dpy = (x_r * sin_phi + y_r * cos_phi) / range_val
+        # d(theta_local)/dpx = (-y_r * cos_phi - x_r * sin_phi) / range_sq
+        # d(theta_local)/dpy = (-y_r * sin_phi + x_r * cos_phi) / range_sq
+        # d(vr)/dpx, d(vr)/dpy, d(vr)/dvx, d(vr)/dvy (这些比较复杂，因为vr的表达式涉及全局速度和相对位置)
 
-        # dvr/dpx, dvr/dpy, dvr/dvx, dvr/dvy
-        # vr = ((vx-obs_vx)*delta_px + (vy-obs_vy)*delta_py) / range_val
-        # 令 rel_vx = vx - obs_vx, rel_vy = vy - obs_vy
-        rel_vx = vx - obs_vx
-        rel_vy = vy - obs_vy
+        # 简化版 H (如果只用距离和局部方位角更新位置，速度通过模型预测)
+        # 或者更完整的H，这里我们用数值方法近似或使用符号计算库推导
+        # 为了让代码能跑起来，我们先用一个简化的H，只考虑位置对距离和局部方位角的影响
+        # 假设速度项对观测函数h(x)中距离和角度部分的偏导为0
+        
+        # dr/dpx_g, dr/dpy_g, dr/dvx_g, dr/dvy_g
+        dr_dpx = x_r * cos_phi / range_val - y_r * (-sin_phi) / range_val # (x_r/range_val)*cos_phi + (y_r/range_val)*sin_phi
+        dr_dpy = x_r * sin_phi / range_val + y_r * cos_phi / range_val   # (x_r/range_val)*sin_phi - (y_r/range_val)*cos_phi
+        H_row1 = [dr_dpx, dr_dpy, 0, 0]
 
-        dvr_dpx = (rel_vx * range_val - (rel_vx * delta_px + rel_vy * delta_py) * delta_px / range_val) / range_sq
-        dvr_dpy = (rel_vy * range_val - (rel_vx * delta_px + rel_vy * delta_py) * delta_py / range_val) / range_sq
-        dvr_dvx = delta_px / range_val
-        dvr_dvy = delta_py / range_val
+        # dtheta_local/dpx_g, dtheta_local/dpy_g, dtheta_local/dvx_g, dtheta_local/dvy_g
+        dthetal_dpx = (-y_r * cos_phi - x_r * (-sin_phi)) / range_sq
+        dthetal_dpy = (-y_r * sin_phi - x_r * cos_phi) / range_sq
+        H_row2 = [dthetal_dpx, dthetal_dpy, 0, 0]
+
+        # dvr/dpx_g, dvr/dpy_g, dvr/dvx_g, dvr/dvy_g
+        # vr = ((vx-obs_vx)*delta_px_g + (vy-obs_vy)*delta_py_g) / range_val_global
+        # delta_px_g = px - obs_px, delta_py_g = py - obs_py
+        # range_val_global = sqrt(delta_px_g^2 + delta_py_g^2)
+        # 注意：这里的range_val是雷达局部坐标系下的距离，而径向速度定义通常基于全局相对位置和速度
+        range_val_global = np.sqrt(delta_px_g**2 + delta_py_g**2)
+        if range_val_global < 1e-6: range_val_global = 1e-6
+
+        rel_vx_g = vx - obs_vx
+        rel_vy_g = vy - obs_vy
+
+        # d(vr)/d(px_g)
+        term1_dpx = rel_vx_g / range_val_global
+        term2_dpx = (rel_vx_g * delta_px_g + rel_vy_g * delta_py_g) * (-delta_px_g / (range_val_global**3))
+        dvr_dpx = term1_dpx + term2_dpx
+        # d(vr)/d(py_g)
+        term1_dpy = rel_vy_g / range_val_global
+        term2_dpy = (rel_vx_g * delta_px_g + rel_vy_g * delta_py_g) * (-delta_py_g / (range_val_global**3))
+        dvr_dpy = term1_dpy + term2_dpy
+        # d(vr)/d(vx_g)
+        dvr_dvx = delta_px_g / range_val_global
+        # d(vr)/d(vy_g)
+        dvr_dvy = delta_py_g / range_val_global
         H_row3 = [dvr_dpx, dvr_dpy, dvr_dvx, dvr_dvy]
 
-        return np.array([H_row1, H_row2, H_row3])
+        H_matrix = np.array([H_row1, H_row2, H_row3])
+        return H_matrix
 
 
     def update(self, z_measurement_polar, observer_state_global):
-        """
-        对应任务4.2的更新步骤 (EKF)
-        :param z_measurement_polar: 当前时刻的雷达观测值 [r, theta_local, vr] (相对于雷达)
-        :param observer_state_global: 当前时刻观测者的状态 [px, py, vx, vy] (全局坐标)
-        """
-        # 观测值z是相对于雷达的极坐标 [r, theta_local, vr]
-        # 我们的状态x是全局笛卡尔坐标 [px, py, vx, vy]
-        # 观测函数h(x)需要将全局状态x转换为相对于当前雷达的极坐标观测
-
-        # 1. 计算预测的观测值 z_pred = h(x_predicted)
-        #    x_predicted 是 self.x (在predict步骤后)
-        #    observer_state_global 用于 hx 函数
         z_pred = self.hx(self.x, observer_state_global)
-
-        # 2. 计算雅可比矩阵 H
         H = self.jacobian_H(self.x, observer_state_global)
-        if np.all(H == 0): # 如果雅可比计算失败（例如距离过近）
-            return False # 更新失败
 
-        # 3. 计算卡尔曼增益 K
+        if np.all(H == 0): # 雅可比计算失败 (例如距离过近导致range_val为0)
+            # print(f"EKF Update skipped for state {self.x.flatten()}: Jacobian H is zero (likely too close to observer).")
+            return False
+
         S = H @ self.P @ H.T + self.R
         try:
             K = self.P @ H.T @ np.linalg.inv(S)
         except np.linalg.LinAlgError:
-            # S矩阵奇异，无法求逆，通常意味着P或R设置有问题，或者数值不稳定
-            print("Warning: Singular matrix S in EKF update. Skipping update.")
-            return False
+            # print(f"Warning: Singular matrix S in EKF update for state {self.x.flatten()}. P:\n{self.P}\nH:\n{H}\nR:\n{self.R}\nS:\n{S}")
+            return False # 更新失败
 
-
-        # 4. 准备实际的观测向量 z (确保是列向量，并且角度差处理正确)
         z_actual = np.array(z_measurement_polar).reshape(3, 1)
-
-        # 创新向量 y (需要处理角度环绕问题)
         y = z_actual - z_pred
-        # 角度差处理: y[1] 是方位角误差 (theta_actual_local - theta_pred_local)
-        # 确保角度差在 -pi 到 pi 之间
         y[1, 0] = (y[1, 0] + np.pi) % (2 * np.pi) - np.pi
 
-
-        # 5. 更新状态和协方差
         self.x = self.x + K @ y
         self.P = (self.I - K @ H) @ self.P
         return True # 更新成功

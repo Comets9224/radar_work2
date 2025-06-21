@@ -78,10 +78,9 @@ def generate_code_structure_string(root_dir_param, backup_subdir_name_to_exclude
     generate_tree_recursive(root_dir_abs)
     return "\n".join(structure_lines)
 
-
 def backup_specific_py_to_txt(source_dir=".", backup_subdir="txt_backup"):
     """
-    Backs up main*.py, other 'main' prefixed .py files in root, and moulds/*.py
+    Backs up all .py files in root, and modules/*.py
     to .txt files in backup_subdir, adds timestamps, and generates code_structure.txt.
     """
     source_directory_abs = os.path.abspath(source_dir) # Define source_directory_abs early
@@ -97,109 +96,66 @@ def backup_specific_py_to_txt(source_dir=".", backup_subdir="txt_backup"):
 
     print(f"准备从 '{source_directory_abs}' 备份特定文件和生成代码结构到 '{backup_dir_path}'...")
     files_to_backup = []
-    # Keep track of files already added to avoid duplicates (e.g. if a "main*.py" is also a "main_prefix*.py")
+    # Keep track of files already added to avoid duplicates
     added_source_paths = set()
 
-    # --- 1. Target "main*.py" (primary main script) in the source_dir ---
-    # This logic tries to find a primary main script like "main.py" or "main_multiple.py"
-    main_py_filename_to_use = None
-    main_py_source_path = None
-    try:
-        # List files in the source directory to check for main scripts
-        root_dir_files = [f for f in os.listdir(source_directory_abs) if os.path.isfile(os.path.join(source_directory_abs, f))]
-        potential_main_files = [f for f in root_dir_files if f.lower().startswith("main") and f.endswith(".py")]
-        if potential_main_files:
-            # Prioritize "main.py" if it exists among them
-            exact_main_py = "main.py"
-            if exact_main_py in potential_main_files:
-                main_py_filename_to_use = exact_main_py
-            else:
-                # If "main.py" is not found, take the first one from the sorted list of "main*.py"
-                # Sorting ensures some predictability if multiple main_*.py files exist
-                main_py_filename_to_use = sorted(potential_main_files)[0]
-            if main_py_filename_to_use:
-                main_py_source_path = os.path.join(source_directory_abs, main_py_filename_to_use)
-                print(f"  将尝试备份主脚本: '{main_py_filename_to_use}'")
-
-                if self_script_abs_path and main_py_source_path == self_script_abs_path:
-                    print(f"  信息: '{main_py_filename_to_use}' 是当前运行的脚本，主脚本备份将被跳过。")
-                else:
-                    files_to_backup.append({
-                        "source_path": main_py_source_path,
-                        "original_filename": main_py_filename_to_use,
-                        "relative_source_dir": ""
-                    })
-                    added_source_paths.add(main_py_source_path)
-                    print(f"  找到主脚本: '{main_py_filename_to_use}' 准备备份。")
-        else:
-            print(f"  信息: 在 '{source_directory_abs}' 中未找到符合条件的主 Python 文件 (如 main.py, main_*.py)。")
-
-    except OSError as e:
-        print(f"  错误: 无法读取源目录 '{source_directory_abs}' 中的文件列表: {e}")
-
-
-    # --- 2. Target OTHER .py files in the root directory starting with "main" (case-insensitive) ---
-    print(f"  正在检查根目录 '{source_directory_abs}' 中其他前缀为 'main' 的 .py 文件...")
-    found_other_main_prefix_files = False
+    # --- 1. 修改后的逻辑: 检测根目录下所有的 .py 文件 ---
+    print(f"  正在检查根目录 '{source_directory_abs}' 中的所有 .py 文件...")
+    found_root_py_files = False
     try:
         for item_name in os.listdir(source_directory_abs):
             item_source_path = os.path.join(source_directory_abs, item_name)
-            # Check if it's a file, ends with .py, starts with "main" (case-insensitive),
-            # and hasn't already been added (e.g., as the primary main script)
-            if os.path.isfile(item_source_path) and \
-               item_name.lower().startswith("main") and \
-               item_name.endswith(".py") and \
-               item_source_path not in added_source_paths:
+            # 检查是否是文件，以 .py 结尾
+            if os.path.isfile(item_source_path) and item_name.endswith(".py"):
                 if self_script_abs_path and item_source_path == self_script_abs_path:
                     print(f"  信息: '{item_name}' 是当前运行的脚本，备份将被跳过。")
+                elif item_source_path in added_source_paths:
+                    print(f"  信息: '{item_name}' 已被添加，跳过。")
                 else:
                     files_to_backup.append({
                         "source_path": item_source_path,
                         "original_filename": item_name,
-                        "relative_source_dir": ""
+                        "relative_source_dir": "" # 表示在根目录
                     })
-                    added_source_paths.add(item_source_path) # Add to set to prevent re-adding
-                    print(f"  找到其他 'main' 前缀文件: '{item_name}' 准备备份。")
-                    found_other_main_prefix_files = True
-        if not found_other_main_prefix_files and not any(f['original_filename'].lower().startswith("main") and f['relative_source_dir'] == "" for f in files_to_backup if f['source_path'] not in added_source_paths):
-             # This condition is a bit complex now, simplify the message
-             if not any(f['original_filename'].lower().startswith("main") and f['relative_source_dir'] == "" for f in files_to_backup):
-                 print(f"  信息: 在根目录中未找到额外的前缀为 'main' 的 .py 文件进行备份。")
+                    added_source_paths.add(item_source_path)
+                    print(f"  找到根目录 .py 文件: '{item_name}' 准备备份。")
+                    found_root_py_files = True
+        if not found_root_py_files:
+             print(f"  信息: 在根目录 '{source_directory_abs}' 中未找到 .py 文件进行备份。")
 
     except OSError as e:
-        print(f"  错误: 无法读取源目录 '{source_directory_abs}' 中的文件列表以查找其他 'main' 前缀文件: {e}")
+        print(f"  错误: 无法读取源目录 '{source_directory_abs}' 中的文件列表: {e}")
 
-
-    # --- 3. Target .py files in the moulds subdirectory ---
-    moulds_subdir_name = "moulds"
-    moulds_dir_path = os.path.join(source_directory_abs, moulds_subdir_name)
-    if os.path.exists(moulds_dir_path) and os.path.isdir(moulds_dir_path):
-        print(f"  正在检查 '{moulds_subdir_name}' 目录...")
-        found_in_moulds = False
+    # --- 3. Target .py files in the modules subdirectory (这部分逻辑保持不变, 仅修改了文件夹名称) ---
+    modules_subdir_name = "modules" # <--- 修改点
+    modules_dir_path = os.path.join(source_directory_abs, modules_subdir_name) # <--- 修改点
+    if os.path.exists(modules_dir_path) and os.path.isdir(modules_dir_path): # <--- 修改点
+        print(f"  正在检查 '{modules_subdir_name}' 目录...") # <--- 修改点
+        found_in_modules = False # <--- 修改点 (变量名对应)
         try:
-            for item_name in sorted(os.listdir(moulds_dir_path)): # Sort for consistent order
+            for item_name in sorted(os.listdir(modules_dir_path)): # Sort for consistent order # <--- 修改点
                 if item_name.endswith(".py"):
-                    item_source_path = os.path.join(moulds_dir_path, item_name)
+                    item_source_path = os.path.join(modules_dir_path, item_name) # <--- 修改点
                     if os.path.isfile(item_source_path): # Ensure it's a file
                         if self_script_abs_path and item_source_path == self_script_abs_path:
-                            print(f"  信息: '{moulds_subdir_name}/{item_name}' 是当前运行的脚本，备份将被跳过。")
-                        elif item_source_path in added_source_paths: # Should not happen if moulds is distinct
-                            print(f"  信息: '{moulds_subdir_name}/{item_name}' 已被添加，跳过。")
+                            print(f"  信息: '{modules_subdir_name}/{item_name}' 是当前运行的脚本，备份将被跳过。") # <--- 修改点
+                        elif item_source_path in added_source_paths:
+                            print(f"  信息: '{modules_subdir_name}/{item_name}' 已被添加，跳过。") # <--- 修改点
                         else:
                             files_to_backup.append({
                                 "source_path": item_source_path,
                                 "original_filename": item_name,
-                                "relative_source_dir": moulds_subdir_name
+                                "relative_source_dir": modules_subdir_name # <--- 修改点
                             })
                             added_source_paths.add(item_source_path)
-                            print(f"  找到: '{moulds_subdir_name}/{item_name}' 准备备份。")
-                            found_in_moulds = True
-            if not found_in_moulds:
-                print(f"  信息: 在 '{moulds_dir_path}' 中未找到 .py 文件。")
+                            print(f"  找到: '{modules_subdir_name}/{item_name}' 准备备份。") # <--- 修改点
+                            found_in_modules = True # <--- 修改点 (变量名对应)
+            if not found_in_modules: # <--- 修改点 (变量名对应)
+                print(f"  信息: 在 '{modules_dir_path}' 中未找到 .py 文件。") # <--- 修改点
         except OSError as e:
-            print(f"  错误: 无法读取 '{moulds_dir_path}' 目录: {e}")
+            print(f"  错误: 无法读取 '{modules_dir_path}' 目录: {e}") # <--- 修改点
     else:
-        print(f"  跳过: '{moulds_subdir_name}' 目录在 '{source_directory_abs}' 中未找到或不是一个目录。")
+        print(f"  跳过: '{modules_subdir_name}' 目录在 '{source_directory_abs}' 中未找到或不是一个目录。") # <--- 修改点
 
     # Create backup directory (if it doesn't exist)
     if not os.path.exists(backup_dir_path):
@@ -216,15 +172,13 @@ def backup_specific_py_to_txt(source_dir=".", backup_subdir="txt_backup"):
     backed_up_py_count = 0
     if files_to_backup:
         print(f"\n开始备份 {len(files_to_backup)} 个 .py 文件...")
-        # Sort files_to_backup to ensure consistent processing order, especially for logs/output
-        # Sort by relative_source_dir then original_filename
         files_to_backup.sort(key=lambda x: (x["relative_source_dir"], x["original_filename"]))
 
         for file_info in files_to_backup:
             source_file_path = file_info["source_path"]
             original_filename = file_info["original_filename"]
             base, _ = os.path.splitext(original_filename)
-            destination_filename = base + ".txt" # Backup name remains the same
+            destination_filename = base + ".txt"
             destination_file_path = os.path.join(backup_dir_path, destination_filename)
 
             try:
@@ -276,16 +230,14 @@ def backup_specific_py_to_txt(source_dir=".", backup_subdir="txt_backup"):
         all_targeted_actions_successful = False
     if not files_to_backup and not structure_generated :
         print("主要操作未执行或失败 (无指定PY文件，且结构图生成失败)。")
-    elif all_targeted_actions_successful and (files_to_backup or structure_generated): # Check if any action was even attempted
+    elif all_targeted_actions_successful and (files_to_backup or structure_generated):
           print("所有目标操作均已成功完成。")
     elif not all_targeted_actions_successful and (files_to_backup or structure_generated):
         print("部分目标操作未成功完成，请检查上述日志。")
-    # Case where no files were targeted but structure was generated (e.g. empty project)
     elif not files_to_backup and structure_generated:
         print("Python 文件备份: 无指定文件需要备份。")
         print("代码结构图: 成功生成。")
         print("所有目标操作均已成功完成。")
-
 
     print("\n备份程序执行完毕。")
 
