@@ -10,7 +10,17 @@ TOTAL_SIMULATION_TIME = 20 # (s)
 OBSERVER_INITIAL_STATE = np.array([[0], [0], [10], [0]])  # [px, py, vx, vy]
 TARGETS_CONFIG = [
     {'initial_state': np.array([[20], [5], [1], [0.5]]), 'model': 'CV'},
-    {'initial_state': np.array([[25], [-3], [-0.5], [0.2], [-0.1], [0.05]]), 'model': 'CA'}
+    # 目标 2 (绿色) - 起点向下移动
+    {'initial_state': np.array([[35], [-15], [-0.5], [0.2], [-0.1], [0.05]]), 'model': 'CA'},
+
+    # 目标 3 (青色/蓝色) - 移动到轨迹另一侧（左侧）
+    {'initial_state': np.array([[50], [15], [1.5], [0.1]]), 'model': 'CV'},
+
+    # 目标 4 (黄色) - 不变
+    {'initial_state': np.array([[65], [-10], [1.0], [0.1]]), 'model': 'CV'},
+
+    # 目标 5 (橙色) - 提高速度以增长轨迹
+    {'initial_state': np.array([[80], [-8], [3.0], [-0.5]]), 'model': 'CV'}
 ]
 TARGET_COLORS = ['#FF0000', '#00FF00', '#00FFFF', '#FFFF00', '#FFA500', '#FF00FF'] # Red, Green, Cyan, etc.
 
@@ -40,7 +50,7 @@ SIGMA_VR = 0.2
 R_MEASUREMENT = np.diag([SIGMA_RANGE**2, np.deg2rad(SIGMA_AZIMUTH_DEG)**2, SIGMA_VR**2])
 
 # --- 检测器参数 (DBSCAN) ---
-DBSCAN_EPS = 3.0
+DBSCAN_EPS = 2.7
 DBSCAN_MIN_SAMPLES = 2
 
 # --- 跟踪器参数 ---

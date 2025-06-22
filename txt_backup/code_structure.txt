@@ -1,7 +1,10 @@
-# File processed on: 2025-06-21 23:16:15
+# File processed on: 2025-06-22 10:57:31
 
 radar_simulation_work2/
 ├── modules
+│   ├── output
+│   │   └── plots
+│   │       └── cfar_detection_demo.png
 │   ├── cfar_test.py
 │   ├── data_generator.py
 │   ├── detector.py
@@ -23,8 +26,10 @@ radar_simulation_work2/
 │       ├── trajectories_and_measurements.png
 │       └── trajectories_measurements_detections.png
 ├── README.md
+├── base_para.txt
 ├── config.py
 ├── main.py
 ├── pyproject.toml
 ├── uv.lock
-└── 课程综合实验—雷达数据（模拟）的目标检测与跟踪系统设计 (2025_6_10 19：59：12).html
+├── 课程综合实验—雷达数据（模拟）的目标检测与跟踪系统设计 (2025_6_10 19：59：12).html
+└── 轨迹参数.txt
