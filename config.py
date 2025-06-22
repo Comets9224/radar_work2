@@ -47,16 +47,16 @@ RADAR_RANGE_RESOLUTION_M = 1.0
 RADAR_AZIMUTH_RESOLUTION_DEG = 2.0
 
 # --- 检测器参数 (DBSCAN) ---
-DBSCAN_EPS = 6 # 这个值是默认值，会被ROC曲线生成过程临时修改
+DBSCAN_EPS = 4.5 # 这个值是默认值，会被ROC曲线生成过程临时修改
 DBSCAN_MIN_SAMPLES = 1
 
 # --- 新增：ROC曲线参数 ---
 ROC_EPS_VALUES = [1.0, 1.5, 2.0, 2.7, 3.5, 4.5, 6.0, 8.0, 10.0, 12.0, 15.0] # 确保有多个值
 # --- 跟踪器参数 ---
 GATING_THRESHOLD_EUCLIDEAN = 5.0
-M_CONFIRM = 1
-MAX_CONSECUTIVE_MISSES = 10
-N_CONFIRM_AGE = 10
+M_CONFIRM = 3
+MAX_CONSECUTIVE_MISSES = 15
+N_CONFIRM_AGE = 20
 
 # --- 输出路径 ---
 OUTPUT_DIR = "output"
