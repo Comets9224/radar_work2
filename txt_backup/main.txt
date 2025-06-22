@@ -1,4 +1,4 @@
-# File processed on: 2025-06-22 14:40:47
+# File processed on: 2025-06-22 15:23:59
 
 # main.py
 import numpy as np
@@ -27,67 +27,85 @@ def calculate_num_resolution_cells(config_obj_roc):
     return max(1, np.floor(num_range_bins)) * max(1, np.floor(num_azimuth_bins))
 
 
-# 修改 collect_roc_data_point，它现在直接使用全局的 cfg
-def collect_roc_data_point(eps_val,  # 当前的EPS值
+def collect_roc_data_point(current_eps_val,
                            true_target_trajs_roc, obs_traj_roc,
-                           measurements_per_step_polar_roc,
+                           measurements_per_step_polar_roc,  # DBSCAN的输入
                            num_resolution_cells_per_frame_roc):
-    """为单个EPS值计算P_d和P_fa，用于ROC曲线上的一个点。
-       这个函数假设全局的 cfg.DBSCAN_EPS 已经被设置为 eps_val。
     """
-    # cfg.DBSCAN_EPS 应该在调用此函数前被设置
+    为单个EPS值计算P_d和P_fa。
+    全局 cfg.DBSCAN_EPS 应该在调用此函数前被设置为 current_eps_val。
+    """
+    # print(f"\nDEBUG_ROC_COLLECT: --- Collecting Data for EPS = {current_eps_val:.2f} (using global cfg.DBSCAN_EPS = {cfg.DBSCAN_EPS:.2f}) ---") # 可以保留或移除
 
     num_simulation_steps_roc = len(measurements_per_step_polar_roc)
-    true_target_lifetimes_roc = [len(traj) for traj in true_target_trajs_roc]
-    total_true_target_instances_in_sim_roc = sum(true_target_lifetimes_roc)
-
+    actual_true_target_instances_in_coverage_for_pd_denominator = 0
     total_dbscan_fp_clusters_roc = 0
-    total_db_scan_tp_clusters_roc = 0  # 修正变量名
+    total_dbscan_tp_clusters_roc = 0
 
     for k_roc in range(num_simulation_steps_roc):
         observer_state_k_roc = obs_traj_roc[k_roc]
-        raw_measurements_polar_k_current_step_roc = measurements_per_step_polar_roc[k_roc]
+        raw_measurements_k_for_dbscan = measurements_per_step_polar_roc[k_roc]
 
-        # detector.py 中的函数会读取全局的 cfg.DBSCAN_EPS
         detected_clusters_info_k_roc = detector.detect_targets_by_clustering(
-            raw_measurements_polar_k_current_step_roc,
+            raw_measurements_k_for_dbscan,
             observer_state_k_roc,
-            cfg  # 直接传递全局cfg
+            cfg
         )
 
-        true_target_states_at_k_for_eval_roc = []
+        true_targets_in_physical_coverage_this_frame = []
+        observer_state_k_xy_vxvy_roc = obs_traj_roc[k_roc][:4]
         for target_idx_roc, true_traj_single_target_roc in enumerate(true_target_trajs_roc):
             if k_roc < len(true_traj_single_target_roc):
-                true_target_states_at_k_for_eval_roc.append({
-                    "id": target_idx_roc, "pos_xy": true_traj_single_target_roc[k_roc, :2]})
+                target_state_k_xy_vxvy_roc = true_traj_single_target_roc[k_roc, :4]
+                dist, angle_local, _ = data_generator.transform_to_radar_polar_coords(
+                    target_state_k_xy_vxvy_roc, observer_state_k_xy_vxvy_roc
+                )
+                in_range = cfg.RADAR_MIN_RANGE <= dist <= cfg.RADAR_MAX_RANGE
+                in_fov = abs(np.rad2deg(angle_local)) <= cfg.RADAR_FOV_DEG / 2
+                if in_range and in_fov:
+                    actual_true_target_instances_in_coverage_for_pd_denominator += 1
+                    true_targets_in_physical_coverage_this_frame.append({
+                        "id": target_idx_roc, "pos_xy": true_traj_single_target_roc[k_roc, :2]
+                    })
 
         associated_tp_count_k = 0
-        if detected_clusters_info_k_roc and true_target_states_at_k_for_eval_roc:
-            num_det_clusters_roc = len(detected_clusters_info_k_roc)
-            cost_matrix_dbscan_true_roc = np.full((num_det_clusters_roc, len(true_target_states_at_k_for_eval_roc)),
-                                                  np.inf)
-            for i_roc, det_cluster_roc in enumerate(detected_clusters_info_k_roc):
-                det_pos_roc = np.array(det_cluster_roc['position_global'])
-                for j_roc, true_target_data_roc in enumerate(true_target_states_at_k_for_eval_roc):
-                    true_pos_roc = true_target_data_roc["pos_xy"]
-                    dist_roc = np.linalg.norm(det_pos_roc - true_pos_roc)
-                    cost_matrix_dbscan_true_roc[i_roc, j_roc] = dist_roc
+        num_fp_this_frame = 0
 
-            det_indices_roc, true_indices_roc = linear_sum_assignment(cost_matrix_dbscan_true_roc)
-            association_threshold_roc = eps_val * 1.5
-            for d_idx_roc, t_idx_roc in zip(det_indices_roc, true_indices_roc):
-                if cost_matrix_dbscan_true_roc[d_idx_roc, t_idx_roc] < association_threshold_roc:
-                    associated_tp_count_k += 1
+        if detected_clusters_info_k_roc:
+            if true_targets_in_physical_coverage_this_frame:
+                num_det_clusters_roc = len(detected_clusters_info_k_roc)
+                cost_matrix_dbscan_true_roc = np.full(
+                    (num_det_clusters_roc, len(true_targets_in_physical_coverage_this_frame)), np.inf)
+                for i_roc, det_cluster_roc in enumerate(detected_clusters_info_k_roc):
+                    det_pos_roc = np.array(det_cluster_roc['position_global'])
+                    for j_roc, true_target_data_roc in enumerate(true_targets_in_physical_coverage_this_frame):
+                        true_pos_roc = true_target_data_roc["pos_xy"]
+                        dist_roc = np.linalg.norm(det_pos_roc - true_pos_roc)
+                        cost_matrix_dbscan_true_roc[i_roc, j_roc] = dist_roc
 
-        total_db_scan_tp_clusters_roc += associated_tp_count_k  # 使用修正后的变量名
-        total_dbscan_fp_clusters_roc += (len(detected_clusters_info_k_roc) - associated_tp_count_k)
+                det_indices_roc, true_indices_roc = linear_sum_assignment(cost_matrix_dbscan_true_roc)
+                association_threshold_roc = 3.0  # 固定关联门限，或者 current_eps_val * 1.5
 
-    pd_roc = total_db_scan_tp_clusters_roc / total_true_target_instances_in_sim_roc if total_true_target_instances_in_sim_roc > 0 else 0
+                successfully_associated_detections_indices = set()
+                for d_idx_roc, t_idx_roc in zip(det_indices_roc, true_indices_roc):
+                    distance = cost_matrix_dbscan_true_roc[d_idx_roc, t_idx_roc]
+                    if distance < association_threshold_roc:
+                        associated_tp_count_k += 1
+                        successfully_associated_detections_indices.add(d_idx_roc)
+                num_fp_this_frame = len(detected_clusters_info_k_roc) - len(successfully_associated_detections_indices)
+            else:
+                num_fp_this_frame = len(detected_clusters_info_k_roc)
+
+        total_dbscan_tp_clusters_roc += associated_tp_count_k
+        total_dbscan_fp_clusters_roc += num_fp_this_frame
+
+    pd_roc = total_dbscan_tp_clusters_roc / actual_true_target_instances_in_coverage_for_pd_denominator if actual_true_target_instances_in_coverage_for_pd_denominator > 0 else 0
     total_false_alarm_opportunities_roc = num_resolution_cells_per_frame_roc * num_simulation_steps_roc
     pfa_roc = total_dbscan_fp_clusters_roc / total_false_alarm_opportunities_roc if total_false_alarm_opportunities_roc > 0 else 0
 
-    print(f"  ROC Point (EPS={eps_val:.2f}): P_fa={pfa_roc:.3e}, P_d={pd_roc:.3%}")
-    return {'eps': eps_val, 'pfa': pfa_roc, 'pd': pd_roc}
+    # 这个打印对于确认每个EPS点的结果很有用，可以保留
+    print(f"  ROC Point (EPS={current_eps_val:.2f}): P_fa={pfa_roc:.3e}, P_d={pd_roc:.3%}")
+    return {'eps': current_eps_val, 'pfa': pfa_roc, 'pd': pd_roc}
 
 
 # run_full_simulation_and_metrics 函数保持不变，它会使用当前的全局 cfg
