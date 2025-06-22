@@ -1,4 +1,4 @@
-# File processed on: 2025-06-22 11:22:34
+# File processed on: 2025-06-22 14:40:47
 
 # config.py
 import numpy as np
@@ -12,19 +12,12 @@ TOTAL_SIMULATION_TIME = 20 # (s)
 OBSERVER_INITIAL_STATE = np.array([[0], [0], [10], [0]])  # [px, py, vx, vy]
 TARGETS_CONFIG = [
     {'initial_state': np.array([[20], [5], [1], [0.5]]), 'model': 'CV'},
-    # 目标 2 (绿色) - 起点向下移动
     {'initial_state': np.array([[35], [-15], [-0.5], [0.2], [-0.1], [0.05]]), 'model': 'CA'},
-
-    # 目标 3 (青色/蓝色) - 移动到轨迹另一侧（左侧）
     {'initial_state': np.array([[50], [15], [1.5], [0.1]]), 'model': 'CV'},
-
-    # 目标 4 (黄色) - 不变
     {'initial_state': np.array([[65], [-10], [1.0], [0.1]]), 'model': 'CV'},
-
-    # 目标 5 (橙色) - 提高速度以增长轨迹
     {'initial_state': np.array([[80], [-8], [3.0], [-0.5]]), 'model': 'CV'}
 ]
-TARGET_COLORS = ['#FF0000', '#00FF00', '#00FFFF', '#FFFF00', '#FFA500', '#FF00FF'] # Red, Green, Cyan, etc.
+TARGET_COLORS = ['#FF0000', '#00FF00', '#00FFFF', '#FFFF00', '#FFA500', '#FF00FF']
 
 # --- 运动模型 ---
 def get_model_functions(model_type):
@@ -44,22 +37,30 @@ def get_model_functions(model_type):
 RADAR_MAX_RANGE = 70.0
 RADAR_MIN_RANGE = 2.0
 RADAR_FOV_DEG = 90.0
-PROB_DETECTION = 0.9
-CLUTTER_RATE = 5
-SIGMA_RANGE = 0.5
-SIGMA_AZIMUTH_DEG = 1.0
+PROB_DETECTION = 1.0
+CLUTTER_RATE = 0
+SIGMA_RANGE = 0.01
+SIGMA_AZIMUTH_DEG = 0.01
 SIGMA_VR = 0.2
 R_MEASUREMENT = np.diag([SIGMA_RANGE**2, np.deg2rad(SIGMA_AZIMUTH_DEG)**2, SIGMA_VR**2])
 
+# --- 新增：雷达分辨率参数 (用于严格P_fa计算) ---
+RADAR_RANGE_RESOLUTION_M = 1.0  # 示例值：距离分辨率1米
+RADAR_AZIMUTH_RESOLUTION_DEG = 2.0 # 示例值：方位角分辨率2度
+
 # --- 检测器参数 (DBSCAN) ---
-DBSCAN_EPS = 2.7
-DBSCAN_MIN_SAMPLES = 2
+DBSCAN_EPS = 6 # 这个值是默认值，会被ROC曲线生成过程临时修改
+DBSCAN_MIN_SAMPLES = 1
+
+# --- 新增：ROC曲线参数 ---
+# ROC_EPS_VALUES = np.linspace(1.0, 8.0, 10)  # DBSCAN_EPS变化范围，可以根据需要调整
+ROC_EPS_VALUES = [1.0, 1.5, 2.0, 2.7, 3.5, 4.5, 6.0, 8.0] # 更具体的示例点
 
 # --- 跟踪器参数 ---
-GATING_THRESHOLD_EUCLIDEAN = 5.0  # 关联门限可以保持不变
-M_CONFIRM = 1  # 修改：命中2次就足以确认，让航迹更容易被确认
-MAX_CONSECUTIVE_MISSES = 10 # 修改：容忍更多次的连续漏检，让航迹不容易丢失
-N_CONFIRM_AGE = 10 # 修改：给暂定航迹更长的观察期来证明自己
+GATING_THRESHOLD_EUCLIDEAN = 5.0
+M_CONFIRM = 1
+MAX_CONSECUTIVE_MISSES = 10
+N_CONFIRM_AGE = 10
 
 # --- 输出路径 ---
 OUTPUT_DIR = "output"
@@ -68,4 +69,8 @@ OUTPUT_PLOTS_DIR = os.path.join(OUTPUT_DIR, "plots")
 
 def print_config_summary():
     print("--- Configuration Loaded ---")
-    # ... (可以添加打印配置信息的代码)
+    print(f"  DBSCAN EPS (default for main sim): {DBSCAN_EPS}")
+    # ... (可以添加更多配置信息的打印)
+
+if __name__ == '__main__':
+    print_config_summary()
