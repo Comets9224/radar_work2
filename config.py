@@ -35,10 +35,10 @@ def get_model_functions(model_type):
 RADAR_MAX_RANGE = 70.0
 RADAR_MIN_RANGE = 2.0
 RADAR_FOV_DEG = 90.0
-PROB_DETECTION = 0.9
-CLUTTER_RATE = 5
-SIGMA_RANGE = 0.5
-SIGMA_AZIMUTH_DEG = 1.0
+PROB_DETECTION = 1.0
+CLUTTER_RATE = 0
+SIGMA_RANGE = 0.01
+SIGMA_AZIMUTH_DEG = 0.01
 SIGMA_VR = 0.2
 R_MEASUREMENT = np.diag([SIGMA_RANGE**2, np.deg2rad(SIGMA_AZIMUTH_DEG)**2, SIGMA_VR**2])
 
@@ -47,8 +47,8 @@ RADAR_RANGE_RESOLUTION_M = 1.0  # 示例值：距离分辨率1米
 RADAR_AZIMUTH_RESOLUTION_DEG = 2.0 # 示例值：方位角分辨率2度
 
 # --- 检测器参数 (DBSCAN) ---
-DBSCAN_EPS = 2.7 # 这个值是默认值，会被ROC曲线生成过程临时修改
-DBSCAN_MIN_SAMPLES = 2
+DBSCAN_EPS = 6 # 这个值是默认值，会被ROC曲线生成过程临时修改
+DBSCAN_MIN_SAMPLES = 1
 
 # --- 新增：ROC曲线参数 ---
 # ROC_EPS_VALUES = np.linspace(1.0, 8.0, 10)  # DBSCAN_EPS变化范围，可以根据需要调整
