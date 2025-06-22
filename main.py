@@ -2,318 +2,325 @@
 import numpy as np
 import os
 import matplotlib.pyplot as plt
-import config as cfg
+import config as cfg  # cfg 的 DBSCAN_EPS 会被临时修改
 from modules import data_generator, detector, visualizer
 from modules.tracker import Tracker
 from modules.track import Track
 from scipy.optimize import linear_sum_assignment
-from collections import defaultdict # <--- 新增导入
+from collections import defaultdict
 
-def run_simulation():
-    """主仿真函数，调度所有模块"""
+
+# import copy #不再需要 deepcopy整个模块
+
+# --- ROC曲线的点将存储在这里 ---
+# roc_curve_points_data = [] # 可以移到主函数内部
+
+def calculate_num_resolution_cells(config_obj_roc):
+    """计算雷达视场内的分辨单元总数 (近似)"""
+    if config_obj_roc.RADAR_RANGE_RESOLUTION_M <= 0 or config_obj_roc.RADAR_AZIMUTH_RESOLUTION_DEG <= 0:
+        return 1e6
+    num_range_bins = (
+                                 config_obj_roc.RADAR_MAX_RANGE - config_obj_roc.RADAR_MIN_RANGE) / config_obj_roc.RADAR_RANGE_RESOLUTION_M
+    num_azimuth_bins = config_obj_roc.RADAR_FOV_DEG / config_obj_roc.RADAR_AZIMUTH_RESOLUTION_DEG
+    return max(1, np.floor(num_range_bins)) * max(1, np.floor(num_azimuth_bins))
+
+
+# 修改 collect_roc_data_point，它现在直接使用全局的 cfg
+def collect_roc_data_point(eps_val,  # 当前的EPS值
+                           true_target_trajs_roc, obs_traj_roc,
+                           measurements_per_step_polar_roc,
+                           num_resolution_cells_per_frame_roc):
+    """为单个EPS值计算P_d和P_fa，用于ROC曲线上的一个点。
+       这个函数假设全局的 cfg.DBSCAN_EPS 已经被设置为 eps_val。
+    """
+    # cfg.DBSCAN_EPS 应该在调用此函数前被设置
+
+    num_simulation_steps_roc = len(measurements_per_step_polar_roc)
+    true_target_lifetimes_roc = [len(traj) for traj in true_target_trajs_roc]
+    total_true_target_instances_in_sim_roc = sum(true_target_lifetimes_roc)
+
+    total_dbscan_fp_clusters_roc = 0
+    total_db_scan_tp_clusters_roc = 0  # 修正变量名
+
+    for k_roc in range(num_simulation_steps_roc):
+        observer_state_k_roc = obs_traj_roc[k_roc]
+        raw_measurements_polar_k_current_step_roc = measurements_per_step_polar_roc[k_roc]
+
+        # detector.py 中的函数会读取全局的 cfg.DBSCAN_EPS
+        detected_clusters_info_k_roc = detector.detect_targets_by_clustering(
+            raw_measurements_polar_k_current_step_roc,
+            observer_state_k_roc,
+            cfg  # 直接传递全局cfg
+        )
+
+        true_target_states_at_k_for_eval_roc = []
+        for target_idx_roc, true_traj_single_target_roc in enumerate(true_target_trajs_roc):
+            if k_roc < len(true_traj_single_target_roc):
+                true_target_states_at_k_for_eval_roc.append({
+                    "id": target_idx_roc, "pos_xy": true_traj_single_target_roc[k_roc, :2]})
+
+        associated_tp_count_k = 0
+        if detected_clusters_info_k_roc and true_target_states_at_k_for_eval_roc:
+            num_det_clusters_roc = len(detected_clusters_info_k_roc)
+            cost_matrix_dbscan_true_roc = np.full((num_det_clusters_roc, len(true_target_states_at_k_for_eval_roc)),
+                                                  np.inf)
+            for i_roc, det_cluster_roc in enumerate(detected_clusters_info_k_roc):
+                det_pos_roc = np.array(det_cluster_roc['position_global'])
+                for j_roc, true_target_data_roc in enumerate(true_target_states_at_k_for_eval_roc):
+                    true_pos_roc = true_target_data_roc["pos_xy"]
+                    dist_roc = np.linalg.norm(det_pos_roc - true_pos_roc)
+                    cost_matrix_dbscan_true_roc[i_roc, j_roc] = dist_roc
+
+            det_indices_roc, true_indices_roc = linear_sum_assignment(cost_matrix_dbscan_true_roc)
+            association_threshold_roc = eps_val * 1.5
+            for d_idx_roc, t_idx_roc in zip(det_indices_roc, true_indices_roc):
+                if cost_matrix_dbscan_true_roc[d_idx_roc, t_idx_roc] < association_threshold_roc:
+                    associated_tp_count_k += 1
+
+        total_db_scan_tp_clusters_roc += associated_tp_count_k  # 使用修正后的变量名
+        total_dbscan_fp_clusters_roc += (len(detected_clusters_info_k_roc) - associated_tp_count_k)
+
+    pd_roc = total_db_scan_tp_clusters_roc / total_true_target_instances_in_sim_roc if total_true_target_instances_in_sim_roc > 0 else 0
+    total_false_alarm_opportunities_roc = num_resolution_cells_per_frame_roc * num_simulation_steps_roc
+    pfa_roc = total_dbscan_fp_clusters_roc / total_false_alarm_opportunities_roc if total_false_alarm_opportunities_roc > 0 else 0
+
+    print(f"  ROC Point (EPS={eps_val:.2f}): P_fa={pfa_roc:.3e}, P_d={pd_roc:.3%}")
+    return {'eps': eps_val, 'pfa': pfa_roc, 'pd': pd_roc}
+
+
+# run_full_simulation_and_metrics 函数保持不变，它会使用当前的全局 cfg
+def run_full_simulation_and_metrics(config_obj_final, true_target_trajs_final, obs_traj_final,
+                                    measurements_per_step_polar_final):
+    # ... (这个函数的内容与你之前提供的版本完全相同，它使用传入的config_obj_final) ...
+    # ... (确保它内部所有对config的引用都是通过 config_obj_final) ...
+    print(f"\n--- Running Full Simulation with DBSCAN_EPS = {config_obj_final.DBSCAN_EPS} ---")
+    num_simulation_steps = len(measurements_per_step_polar_final)
+    num_true_targets = len(true_target_trajs_final)
+
+    Track._next_id = 1
+    tracker = Tracker()
+    all_detections_info_over_time = []
+    all_tracks_info_over_time = []
+    all_time_steps_data_for_rmse = []
+    RMSE_ASSOCIATION_GATE = config_obj_final.GATING_THRESHOLD_EUCLIDEAN * 2.5
+
+    true_target_coverage_history = defaultdict(lambda: [False] * num_simulation_steps)
+    confirmed_track_association_history = defaultdict(lambda: [False] * num_simulation_steps)
+    track_lifecycles = {}
+    total_confirmed_tracks_frames = 0
+    total_associated_confirmed_tracks_frames = 0
+    num_false_alarms_detected_by_dbscan_console = 0
+    num_true_detections_by_dbscan_console = 0
+    true_target_lifetimes = [len(traj) for traj in true_target_trajs_final]
+
+    for k in range(num_simulation_steps):
+        current_time = k * config_obj_final.DT
+        observer_state_k = obs_traj_final[k]
+        raw_measurements_polar_k_current_step = measurements_per_step_polar_final[k]
+
+        detected_clusters_info_k = detector.detect_targets_by_clustering(
+            raw_measurements_polar_k_current_step, observer_state_k, config_obj_final)  # 使用传入的config
+        all_detections_info_over_time.append(detected_clusters_info_k)
+
+        tracked_info_for_frame_k = tracker.step(detected_clusters_info_k, observer_state_k)  # tracker内部会用全局cfg.DT等
+        all_tracks_info_over_time.append(tracked_info_for_frame_k)
+
+        true_target_states_at_k_for_metrics = []
+        for tidx, ttst in enumerate(true_target_trajs_final):
+            if k < len(ttst):
+                true_target_states_at_k_for_metrics.append(
+                    {"id": tidx, "state_xy_vxvy": ttst[k, :4], "pos_xy": ttst[k, :2]})
+
+        confirmed_tracks_at_k_for_metrics = []
+        for track_info in tracked_info_for_frame_k:
+            if track_info['id'] not in track_lifecycles:
+                track_lifecycles[track_info['id']] = {'start_frame': k, 'end_frame': k,
+                                                      'is_true_association_ever': False}
+            else:
+                track_lifecycles[track_info['id']]['end_frame'] = k
+            if track_info['state'] == 'Confirmed' and track_info['history']:
+                total_confirmed_tracks_frames += 1
+                confirmed_tracks_at_k_for_metrics.append(
+                    {"id": track_info['id'], "state_xy_vxvy": np.array(track_info['history'][-1][:4]),
+                     "pos_xy": np.array(track_info['history'][-1][:2])})
+
+        step_pos_sq_errors, step_vel_sq_errors = [], []
+
+        detected_cluster_associated_to_true_console = [False] * len(detected_clusters_info_k)
+        if detected_clusters_info_k and true_target_states_at_k_for_metrics:
+            cost_mat_db_true_console = np.full(
+                (len(detected_clusters_info_k), len(true_target_states_at_k_for_metrics)), np.inf)
+            for i_c, det_c_c in enumerate(detected_clusters_info_k):
+                det_p_c = np.array(det_c_c['position_global'])
+                for j_c, true_t_d_c in enumerate(true_target_states_at_k_for_metrics):
+                    true_p_c = true_t_d_c["pos_xy"]
+                    dist_c = np.linalg.norm(det_p_c - true_p_c)
+                    cost_mat_db_true_console[i_c, j_c] = dist_c
+            det_idx_c, true_idx_c = linear_sum_assignment(cost_mat_db_true_console)
+            for d_i_c, t_i_c in zip(det_idx_c, true_idx_c):
+                if cost_mat_db_true_console[d_i_c, t_i_c] < config_obj_final.DBSCAN_EPS * 3:
+                    detected_cluster_associated_to_true_console[d_i_c] = True
+        num_true_detections_by_dbscan_console += sum(detected_cluster_associated_to_true_console)
+        num_false_alarms_detected_by_dbscan_console += (
+                    len(detected_clusters_info_k) - sum(detected_cluster_associated_to_true_console))
+
+        if confirmed_tracks_at_k_for_metrics and true_target_states_at_k_for_metrics:
+            cost_mat_rmse = np.full((len(confirmed_tracks_at_k_for_metrics), len(true_target_states_at_k_for_metrics)),
+                                    np.inf)
+            for i_r, conf_track_d_r in enumerate(confirmed_tracks_at_k_for_metrics):
+                est_p_r = conf_track_d_r["pos_xy"]
+                for j_r, true_t_d_r in enumerate(true_target_states_at_k_for_metrics):
+                    true_p_r = true_t_d_r["pos_xy"]
+                    dist_r = np.linalg.norm(est_p_r - true_p_r)
+                    cost_mat_rmse[i_r, j_r] = dist_r
+            track_idx_r, true_idx_r_rmse = linear_sum_assignment(cost_mat_rmse)
+            for tr_ir, gt_ir in zip(track_idx_r, true_idx_r_rmse):
+                if cost_mat_rmse[tr_ir, gt_ir] < RMSE_ASSOCIATION_GATE:
+                    est_s_r = confirmed_tracks_at_k_for_metrics[tr_ir]["state_xy_vxvy"]
+                    true_s_r = true_target_states_at_k_for_metrics[gt_ir]["state_xy_vxvy"]
+                    step_pos_sq_errors.append(np.sum((est_s_r[:2] - true_s_r[:2]) ** 2))
+                    step_vel_sq_errors.append(np.sum((est_s_r[2:4] - true_s_r[2:4]) ** 2))
+                    true_target_coverage_history[true_target_states_at_k_for_metrics[gt_ir]["id"]][k] = True
+                    confirmed_track_association_history[confirmed_tracks_at_k_for_metrics[tr_ir]["id"]][k] = True
+                    track_lifecycles[confirmed_tracks_at_k_for_metrics[tr_ir]["id"]]['is_true_association_ever'] = True
+                    total_associated_confirmed_tracks_frames += 1
+        all_time_steps_data_for_rmse.append(
+            {"time": current_time, "pos_sq_errors": step_pos_sq_errors, "vel_sq_errors": step_vel_sq_errors})
+
+        if (k + 1) % 20 == 0 or k == num_simulation_steps - 1:
+            print(
+                f"  Time {current_time:.1f}s: RawMeas={len(raw_measurements_polar_k_current_step)}, Detections={len(detected_clusters_info_k)}, ActiveTracks={len(tracker.tracks)} (Confirmed={sum(1 for ti in tracked_info_for_frame_k if ti['state'] == 'Confirmed')})")
+
+    time_vector = [data['time'] for data in all_time_steps_data_for_rmse]
+    position_rmse_values, velocity_rmse_values = [], []
+    for data in all_time_steps_data_for_rmse:
+        position_rmse_values.append(np.sqrt(np.mean(data['pos_sq_errors'])) if data['pos_sq_errors'] else np.nan)
+        velocity_rmse_values.append(np.sqrt(np.mean(data['vel_sq_errors'])) if data['vel_sq_errors'] else np.nan)
+
+    print("\n--- Performance Metrics (for final run) ---")
+    avg_pos_rmse = np.nanmean(position_rmse_values) if np.any(np.isfinite(position_rmse_values)) else np.nan
+    print(f"Average Position RMSE: {avg_pos_rmse:.3f} m")
+    avg_vel_rmse = np.nanmean(velocity_rmse_values) if np.any(np.isfinite(velocity_rmse_values)) else np.nan
+    print(f"Average Velocity RMSE: {avg_vel_rmse:.3f} m/s")
+    total_target_existence_frames = sum(true_target_lifetimes)
+    total_target_covered_frames = sum(sum(history) for history in true_target_coverage_history.values())
+    avg_track_completeness = (
+                                         total_target_covered_frames / total_target_existence_frames) * 100 if total_target_existence_frames > 0 else 0
+    print(f"Average Track Completeness: {avg_track_completeness:.2f}%")
+    num_total_confirmed_tracks_generated, num_false_confirmed_tracks = 0, 0
+    for track_id, lifecycle_info in track_lifecycles.items():
+        is_ever_confirmed = any(track_data['id'] == track_id and track_data['state'] == 'Confirmed' for frame_tracks in
+                                all_tracks_info_over_time for track_data in frame_tracks)
+        if is_ever_confirmed:
+            num_total_confirmed_tracks_generated += 1
+            if not lifecycle_info['is_true_association_ever']: num_false_confirmed_tracks += 1
+    false_track_rate_per_total_confirmed = (
+                                                       num_false_confirmed_tracks / num_total_confirmed_tracks_generated) * 100 if num_total_confirmed_tracks_generated > 0 else 0
+    print(f"Total Confirmed Tracks Generated: {num_total_confirmed_tracks_generated}")
+    print(f"Number of False Confirmed Tracks (never associated): {num_false_confirmed_tracks}")
+    print(f"False Confirmed Track Rate: {false_track_rate_per_total_confirmed:.2f}%")
+    if total_confirmed_tracks_frames > 0:
+        print(
+            f"Ratio of Confirmed Track Frames that are False (unassociated): {((total_confirmed_tracks_frames - total_associated_confirmed_tracks_frames) / total_confirmed_tracks_frames) * 100:.2f}%")
+    else:
+        print("Ratio of Confirmed Track Frames that are False: N/A")
+    num_targets_potentially_lost, num_targets_actually_lost = 0, 0
+    min_tracking_duration_for_loss_eval = config_obj_final.N_CONFIRM_AGE * 2
+    for gt_idx in range(num_true_targets):
+        gt_lifetime = true_target_lifetimes[gt_idx]
+        if gt_lifetime < min_tracking_duration_for_loss_eval: continue
+        num_targets_potentially_lost += 1
+        coverage = true_target_coverage_history[gt_idx];
+        first_covered_frame, last_covered_frame = -1, -1
+        for frame_idx in range(gt_lifetime):
+            if coverage[frame_idx]:
+                if first_covered_frame == -1: first_covered_frame = frame_idx
+                last_covered_frame = frame_idx
+        if first_covered_frame != -1 and (
+                last_covered_frame < gt_lifetime - (config_obj_final.MAX_CONSECUTIVE_MISSES // 2)) and (
+                last_covered_frame - first_covered_frame > config_obj_final.N_CONFIRM_AGE):
+            num_targets_actually_lost += 1
+    track_loss_rate = (
+                                  num_targets_actually_lost / num_targets_potentially_lost) * 100 if num_targets_potentially_lost > 0 else 0
+    print(
+        f"Approx. Track Loss Rate: {track_loss_rate:.2f}% (for targets tracked > {min_tracking_duration_for_loss_eval * config_obj_final.DT:.1f}s then lost)")
+    avg_true_detections_per_frame_console = num_true_detections_by_dbscan_console / num_simulation_steps if num_simulation_steps > 0 else 0
+    avg_false_alarms_per_frame_dbscan_console = num_false_alarms_detected_by_dbscan_console / num_simulation_steps if num_simulation_steps > 0 else 0
+    print(f"Avg. DBSCAN True Detections per Frame (approx.): {avg_true_detections_per_frame_console:.2f}")
+    print(f"Avg. DBSCAN False Alarms per Frame (approx.): {avg_false_alarms_per_frame_dbscan_console:.2f}")
+    total_true_target_instances_in_sim_console = sum(true_target_lifetimes)
+    if total_true_target_instances_in_sim_console > 0: print(
+        f"Overall DBSCAN Detection Rate for True Targets (approx.): {(num_true_detections_by_dbscan_console / total_true_target_instances_in_sim_console):.2%}")
+
+    detections_for_plot_global_xy = []
+    for frame_detections_info in all_detections_info_over_time:
+        detections_for_plot_global_xy.append([det_info['position_global'] for det_info in frame_detections_info])
+
+    return (all_detections_info_over_time, all_tracks_info_over_time,
+            time_vector, position_rmse_values, velocity_rmse_values,
+            detections_for_plot_global_xy)
+
+
+def main_with_roc():
+    # cfg.print_config_summary() # 移到 run_full_simulation_and_metrics 内部或只调用一次
     data_generator.print_motion_equations()
-    print("\nStarting Radar Target Detection and Tracking System Simulation...")
+    print("\nStarting Radar Target Detection and Tracking System Simulation with ROC Generation...")
 
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     os.makedirs(cfg.OUTPUT_DATA_DIR, exist_ok=True)
     os.makedirs(cfg.OUTPUT_PLOTS_DIR, exist_ok=True)
 
-    print("\n--- Phase 2: Generating Simulation Data ---")
-    true_target_trajs, obs_traj, measurements_per_step_polar = data_generator.generate_full_dataset(cfg)
-    print(f"Generated {len(measurements_per_step_polar)} frames of data.")
-    num_simulation_steps = len(measurements_per_step_polar)
-    num_true_targets = len(true_target_trajs)
+    print("\n--- Phase 1 (Common): Generating Simulation Data ---")
+    true_target_trajs_g, obs_traj_g, measurements_per_step_polar_g = data_generator.generate_full_dataset(cfg)
+    print(f"Generated {len(measurements_per_step_polar_g)} frames of data for all runs.")
 
-    print("\n--- Phase 3 & 4: Detection and Tracking ---")
-    Track._next_id = 1
-    tracker = Tracker()
-    all_detections_info_over_time = []
-    all_tracks_info_over_time = []
+    num_res_cells = calculate_num_resolution_cells(cfg)  # 使用全局cfg计算一次
+    print(f"Estimated number of resolution cells per frame: {num_res_cells}")
+    if num_res_cells <= 0:
+        print("ERROR: Number of resolution cells is zero or negative. Cannot proceed with ROC P_fa.")
+        return
 
-    all_time_steps_data_for_rmse = []
-    RMSE_ASSOCIATION_GATE = cfg.GATING_THRESHOLD_EUCLIDEAN * 2.5
+    print("\n--- Phase 2: Collecting ROC Data ---")
+    roc_data_collected = []
+    original_dbscan_eps = cfg.DBSCAN_EPS  # 保存原始值
 
-    # --- 用于指标计算的辅助数据结构 ---
-    # 记录每个真实目标在每一帧是否被“覆盖”（即有对应的已确认航迹关联上）
-    # key: true_target_idx, value: list of bool (True if covered at frame k)
-    true_target_coverage_history = defaultdict(lambda: [False] * num_simulation_steps)
-
-    # 记录每个已确认航迹在每一帧是否关联到真实目标
-    # key: track_id, value: list of bool (True if associated with a true target at frame k)
-    confirmed_track_association_history = defaultdict(lambda: [False] * num_simulation_steps)
-
-    # 记录每个已确认航迹的生命周期 (出现帧, 消失帧或最后帧)
-    # key: track_id, value: {'start_frame': k_start, 'end_frame': k_end, 'is_true_association_ever': False}
-    track_lifecycles = {}
-
-    total_confirmed_tracks_frames = 0 # 已确认航迹存在的总帧数
-    total_associated_confirmed_tracks_frames = 0 # 已确认航迹且关联到真值的总帧数
-    num_false_alarms_detected_by_dbscan = 0 # DBSCAN检测出的虚警簇数量（近似）
-    num_true_detections_by_dbscan = 0 # DBSCAN检测出的真实目标簇数量（近似）
-
-    # 记录每个真实目标的存在时间（帧数）
-    true_target_lifetimes = [len(traj) for traj in true_target_trajs]
-
-
-    for k in range(num_simulation_steps):
-        current_time = k * cfg.DT
-        observer_state_k = obs_traj[k]
-        raw_measurements_polar_k_current_step = measurements_per_step_polar[k]
-
-        detected_clusters_info_k = detector.detect_targets_by_clustering(
-            raw_measurements_polar_k_current_step,
-            observer_state_k,
-            cfg
+    for eps_val_roc in cfg.ROC_EPS_VALUES:
+        # 关键：在循环内部临时修改全局cfg的DBSCAN_EPS
+        cfg.DBSCAN_EPS = eps_val_roc
+        roc_point = collect_roc_data_point(
+            eps_val_roc,  # 传递当前的eps值，函数内部会用它进行关联等
+            true_target_trajs_g, obs_traj_g,
+            measurements_per_step_polar_g, num_res_cells
         )
-        all_detections_info_over_time.append(detected_clusters_info_k)
+        roc_data_collected.append(roc_point)
 
-        tracked_info_for_frame_k = tracker.step(
-            detected_clusters_info_k,
-            observer_state_k
+    cfg.DBSCAN_EPS = original_dbscan_eps  # 恢复全局cfg的EPS值为原始值
+    roc_data_collected.sort(key=lambda x: x['pfa'])
+
+    # --- Run Full Simulation with Original EPS for Metrics and Main Plots ---
+    # 现在 run_full_simulation_and_metrics 会使用恢复后的全局 cfg
+    (all_detections_final, all_tracks_final, time_vec_final,
+     pos_rmse_final, vel_rmse_final, detections_xy_final) = \
+        run_full_simulation_and_metrics(
+            cfg,  # 传递全局cfg，其DBSCAN_EPS已恢复
+            true_target_trajs_g, obs_traj_g, measurements_per_step_polar_g
         )
-        all_tracks_info_over_time.append(tracked_info_for_frame_k)
-
-        # --- RMSE 和 指标数据收集 ---
-        true_target_states_at_k_for_metrics = []
-        for target_idx, true_traj_single_target in enumerate(true_target_trajs):
-            if k < len(true_traj_single_target):
-                true_target_states_at_k_for_metrics.append({
-                    "id": target_idx, # 使用索引作为临时ID
-                    "state_xy_vxvy": true_traj_single_target[k, :4],
-                    "pos_xy": true_traj_single_target[k, :2]
-                })
-
-        confirmed_tracks_at_k_for_metrics = []
-        active_track_ids_current_frame = set()
-        for track_info in tracked_info_for_frame_k:
-            active_track_ids_current_frame.add(track_info['id'])
-            if track_info['id'] not in track_lifecycles:
-                track_lifecycles[track_info['id']] = {'start_frame': k, 'end_frame': k, 'is_true_association_ever': False}
-            else:
-                track_lifecycles[track_info['id']]['end_frame'] = k
-
-            if track_info['state'] == 'Confirmed' and track_info['history']:
-                total_confirmed_tracks_frames += 1
-                confirmed_tracks_at_k_for_metrics.append({
-                    "id": track_info['id'],
-                    "state_xy_vxvy": np.array(track_info['history'][-1][:4]),
-                    "pos_xy": np.array(track_info['history'][-1][:2])
-                })
-
-        step_pos_sq_errors = []
-        step_vel_sq_errors = []
-
-        # --- DBSCAN 检测结果与真值关联 (用于估算 Pd_eff, Pfa_eff) ---
-        # 注意: 这是一个简化的关联，实际Pd/Pfa计算更复杂
-        # 这里我们只看DBSCAN输出的簇是否能关联到真实目标位置
-        detected_cluster_associated_to_true = [False] * len(detected_clusters_info_k)
-        if detected_clusters_info_k and true_target_states_at_k_for_metrics:
-            num_det_clusters = len(detected_clusters_info_k)
-            num_true_targets_curr = len(true_target_states_at_k_for_metrics)
-            cost_matrix_dbscan_true = np.full((num_det_clusters, num_true_targets_curr), np.inf)
-            for i, det_cluster in enumerate(detected_clusters_info_k):
-                det_pos = np.array(det_cluster['position_global'])
-                for j, true_target_data in enumerate(true_target_states_at_k_for_metrics):
-                    true_pos = true_target_data["pos_xy"]
-                    dist = np.linalg.norm(det_pos - true_pos)
-                    cost_matrix_dbscan_true[i,j] = dist
-
-            det_indices, true_indices = linear_sum_assignment(cost_matrix_dbscan_true)
-            for d_idx, t_idx in zip(det_indices, true_indices):
-                # 使用一个较宽松的门限来判断DBSCAN检测是否对应真实目标
-                if cost_matrix_dbscan_true[d_idx, t_idx] < cfg.DBSCAN_EPS * 3:
-                    detected_cluster_associated_to_true[d_idx] = True
-
-        num_true_detections_by_dbscan += sum(detected_cluster_associated_to_true)
-        num_false_alarms_detected_by_dbscan += (len(detected_clusters_info_k) - sum(detected_cluster_associated_to_true))
-
-
-        # --- 已确认航迹与真值关联 (用于RMSE和航迹指标) ---
-        if confirmed_tracks_at_k_for_metrics and true_target_states_at_k_for_metrics:
-            num_confirmed_tracks = len(confirmed_tracks_at_k_for_metrics)
-            num_true_targets_curr = len(true_target_states_at_k_for_metrics)
-            cost_matrix_rmse = np.full((num_confirmed_tracks, num_true_targets_curr), np.inf)
-
-            for i, confirmed_track_data in enumerate(confirmed_tracks_at_k_for_metrics):
-                est_pos = confirmed_track_data["pos_xy"]
-                for j, true_target_data in enumerate(true_target_states_at_k_for_metrics):
-                    true_pos = true_target_data["pos_xy"]
-                    dist = np.linalg.norm(est_pos - true_pos)
-                    cost_matrix_rmse[i, j] = dist
-
-            track_indices_rmse, true_target_indices_rmse = linear_sum_assignment(cost_matrix_rmse)
-
-            for tr_idx_in_list, gt_idx_in_list in zip(track_indices_rmse, true_target_indices_rmse):
-                if cost_matrix_rmse[tr_idx_in_list, gt_idx_in_list] < RMSE_ASSOCIATION_GATE:
-                    confirmed_track_data = confirmed_tracks_at_k_for_metrics[tr_idx_in_list]
-                    true_target_data = true_target_states_at_k_for_metrics[gt_idx_in_list]
-
-                    est_state = confirmed_track_data["state_xy_vxvy"]
-                    true_state = true_target_data["state_xy_vxvy"]
-
-                    pos_error_sq = np.sum((est_state[:2] - true_state[:2])**2)
-                    vel_error_sq = np.sum((est_state[2:4] - true_state[2:4])**2)
-                    step_pos_sq_errors.append(pos_error_sq)
-                    step_vel_sq_errors.append(vel_error_sq)
-
-                    # 更新指标相关数据
-                    true_target_coverage_history[true_target_data["id"]][k] = True
-                    confirmed_track_association_history[confirmed_track_data["id"]][k] = True
-                    track_lifecycles[confirmed_track_data["id"]]['is_true_association_ever'] = True
-                    total_associated_confirmed_tracks_frames +=1
-
-        all_time_steps_data_for_rmse.append({
-            "time": current_time,
-            "pos_sq_errors": step_pos_sq_errors,
-            "vel_sq_errors": step_vel_sq_errors
-        })
-
-        if (k + 1) % 20 == 0 or k == num_simulation_steps - 1:
-            num_raw = len(raw_measurements_polar_k_current_step)
-            num_detected_clusters = len(detected_clusters_info_k)
-            num_active_tracks_now = len(tracker.tracks) # tracker.tracks 包含所有活动航迹
-            num_confirmed_now = sum(1 for t_info in tracked_info_for_frame_k if t_info['state'] == 'Confirmed')
-            print(
-                f"  Time {current_time:.1f}s: RawMeas={num_raw}, Detections={num_detected_clusters}, ActiveTracks={num_active_tracks_now} (Confirmed={num_confirmed_now})")
-
-    # --- 计算最终的RMSE值 ---
-    time_vector = [data['time'] for data in all_time_steps_data_for_rmse]
-    position_rmse_values = []
-    velocity_rmse_values = []
-
-    for data in all_time_steps_data_for_rmse:
-        if data['pos_sq_errors']:
-            mean_pos_sq_error = np.mean(data['pos_sq_errors'])
-            position_rmse_values.append(np.sqrt(mean_pos_sq_error))
-        else:
-            position_rmse_values.append(np.nan)
-        if data['vel_sq_errors']:
-            mean_vel_sq_error = np.mean(data['vel_sq_errors'])
-            velocity_rmse_values.append(np.sqrt(mean_vel_sq_error))
-        else:
-            velocity_rmse_values.append(np.nan)
-
-    # --- 计算其他性能指标 ---
-    print("\n--- Performance Metrics ---")
-
-    # 1. 平均RMSE
-    avg_pos_rmse = np.nanmean(position_rmse_values) if np.any(np.isfinite(position_rmse_values)) else np.nan
-    avg_vel_rmse = np.nanmean(velocity_rmse_values) if np.any(np.isfinite(velocity_rmse_values)) else np.nan
-    print(f"Average Position RMSE: {avg_pos_rmse:.3f} m (over frames with valid associations)")
-    print(f"Average Velocity RMSE: {avg_vel_rmse:.3f} m/s (over frames with valid associations)")
-
-    # 2. 航迹完整度 (Track Completeness)
-    total_target_existence_frames = sum(true_target_lifetimes)
-    total_target_covered_frames = sum(sum(history) for history in true_target_coverage_history.values())
-    avg_track_completeness = (total_target_covered_frames / total_target_existence_frames) * 100 if total_target_existence_frames > 0 else 0
-    print(f"Average Track Completeness: {avg_track_completeness:.2f}%")
-
-    # 3. 虚假航迹相关指标
-    num_total_confirmed_tracks_generated = 0
-    num_false_confirmed_tracks = 0
-    for track_id, lifecycle_info in track_lifecycles.items():
-        # 筛选出那些曾经达到Confirmed状态的航迹
-        # (需要从 all_tracks_info_over_time 中确认该航迹是否曾达到Confirmed)
-        # 这是一个简化：如果一个航迹在其生命周期内从未关联到真实目标，我们认为它是虚假航迹
-        # 更准确的做法是检查其在Confirmed状态期间的关联情况
-        is_ever_confirmed = False
-        for frame_tracks in all_tracks_info_over_time:
-            for track_data in frame_tracks:
-                if track_data['id'] == track_id and track_data['state'] == 'Confirmed':
-                    is_ever_confirmed = True
-                    break
-            if is_ever_confirmed:
-                break
-
-        if is_ever_confirmed:
-            num_total_confirmed_tracks_generated += 1
-            if not lifecycle_info['is_true_association_ever']:
-                num_false_confirmed_tracks += 1
-
-    false_track_rate_per_total_confirmed = (num_false_confirmed_tracks / num_total_confirmed_tracks_generated) * 100 if num_total_confirmed_tracks_generated > 0 else 0
-    print(f"Total Confirmed Tracks Generated: {num_total_confirmed_tracks_generated}")
-    print(f"Number of False Confirmed Tracks (never associated): {num_false_confirmed_tracks}")
-    print(f"False Confirmed Track Rate: {false_track_rate_per_total_confirmed:.2f}%")
-
-    # 另一种虚假航迹率：(总确认航迹帧数 - 总关联确认航迹帧数) / 总确认航迹帧数
-    if total_confirmed_tracks_frames > 0:
-        false_track_frame_ratio = ((total_confirmed_tracks_frames - total_associated_confirmed_tracks_frames) / total_confirmed_tracks_frames) * 100
-        print(f"Ratio of Confirmed Track Frames that are False (unassociated): {false_track_frame_ratio:.2f}%")
-    else:
-        print("Ratio of Confirmed Track Frames that are False: N/A (no confirmed frames)")
-
-
-    # 4. 航迹丢失率 (Track Loss Rate) - 这是一个比较复杂的指标，简化计算：
-    # 考虑那些至少被跟踪了一段时间（比如超过N_CONFIRM_AGE帧）的真实目标，
-    # 看它们在后续的生命周期中，航迹是否被删除了。
-    # 这里的实现比较粗略：
-    num_targets_potentially_lost = 0
-    num_targets_actually_lost = 0
-    min_tracking_duration_for_loss_eval = cfg.N_CONFIRM_AGE * 2 # 真实目标至少被跟踪这么久才考虑丢失
-
-    for gt_idx in range(num_true_targets):
-        gt_lifetime = true_target_lifetimes[gt_idx]
-        if gt_lifetime < min_tracking_duration_for_loss_eval:
-            continue # 目标存在时间太短，不评估丢失
-
-        num_targets_potentially_lost += 1
-
-        # 检查该真实目标是否在生命周期中段后丢失了覆盖
-        # (即，在被覆盖一段时间后，后续帧不再被覆盖直到其生命周期结束)
-        coverage = true_target_coverage_history[gt_idx]
-        first_covered_frame = -1
-        last_covered_frame = -1
-        for frame_idx in range(gt_lifetime):
-            if coverage[frame_idx]:
-                if first_covered_frame == -1:
-                    first_covered_frame = frame_idx
-                last_covered_frame = frame_idx
-
-        if first_covered_frame != -1 and (last_covered_frame < gt_lifetime - (cfg.MAX_CONSECUTIVE_MISSES // 2)) and (last_covered_frame - first_covered_frame > cfg.N_CONFIRM_AGE):
-            # 如果最后覆盖帧远早于目标消失，且目标曾被稳定跟踪过一段时间
-            num_targets_actually_lost +=1
-
-    track_loss_rate = (num_targets_actually_lost / num_targets_potentially_lost) * 100 if num_targets_potentially_lost > 0 else 0
-    print(f"Approx. Track Loss Rate: {track_loss_rate:.2f}% (for targets tracked > {min_tracking_duration_for_loss_eval*cfg.DT:.1f}s then lost)")
-
-    # 5. 估算检测性能 (基于DBSCAN输出)
-    # 这里的 "true detections" 是指DBSCAN的输出簇能关联到真实目标
-    # "false alarms" 是指DBSCAN的输出簇不能关联到真实目标
-    # 这不是严格意义上的雷达Pd, Pfa，而是DBSCAN处理后的结果
-    avg_true_detections_per_frame = num_true_detections_by_dbscan / num_simulation_steps if num_simulation_steps > 0 else 0
-    avg_false_alarms_per_frame_dbscan = num_false_alarms_detected_by_dbscan / num_simulation_steps if num_simulation_steps > 0 else 0
-    print(f"Avg. DBSCAN True Detections per Frame (approx.): {avg_true_detections_per_frame:.2f}")
-    print(f"Avg. DBSCAN False Alarms per Frame (approx.): {avg_false_alarms_per_frame_dbscan:.2f}")
-
-    # 简单的检测概率估算：(DBSCAN检测到的真实目标数) / (场景中真实目标总数，假设都在传感器范围内)
-    # 这是一个非常粗略的估计
-    total_true_target_instances_in_sim = sum(true_target_lifetimes)
-    if total_true_target_instances_in_sim > 0:
-        overall_pd_estimate_dbscan = num_true_detections_by_dbscan / total_true_target_instances_in_sim
-        print(f"Overall DBSCAN Detection Rate for True Targets (approx.): {overall_pd_estimate_dbscan:.2%}")
-
 
     print("\n--- Phase 5: Visualization ---")
-    # ... (后续的绘图代码不变) ...
-    detections_for_plot_global_xy = []
-    for frame_detections_info in all_detections_info_over_time:
-        current_frame_xy_detections = []
-        for det_info in frame_detections_info:
-            current_frame_xy_detections.append(det_info['position_global'])
-        detections_for_plot_global_xy.append(current_frame_xy_detections)
-
-    visualizer.plot_results(
-        observer_trajectory=obs_traj,
-        true_target_trajectories=true_target_trajs,
-        measurements_over_time_polar=measurements_per_step_polar,
-        detections_over_time_global_xy_list_of_lists=detections_for_plot_global_xy,
-        all_tracks_info_over_time=all_tracks_info_over_time,
-        time_vector=time_vector,
-        position_rmse_over_time=position_rmse_values, # 使用新的变量名
-        velocity_rmse_over_time=velocity_rmse_values  # 使用新的变量名
+    visualizer.plot_results_with_roc(
+        observer_trajectory=obs_traj_g,
+        true_target_trajectories=true_target_trajs_g,
+        measurements_over_time_polar=measurements_per_step_polar_g,
+        detections_over_time_global_xy_list_of_lists=detections_xy_final,
+        all_tracks_info_over_time=all_tracks_final,
+        time_vector=time_vec_final,
+        position_rmse_over_time=pos_rmse_final,
+        velocity_rmse_over_time=vel_rmse_final,
+        roc_data=roc_data_collected
     )
 
     print("\nSimulation complete. Plot saved in 'output/plots/' directory.")
 
+
 if __name__ == '__main__':
-    run_simulation()
+    main_with_roc()
